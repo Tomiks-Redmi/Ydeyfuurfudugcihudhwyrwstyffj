@@ -6,7 +6,7 @@ import re
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QKeyEvent, QTextCharFormat, QTextCursor
 from PyQt6.QtWidgets import (
-    QApplication, QCompleter, QFrame, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit,
+    QApplication, QCheckBox, QCompleter, QFrame, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit,
     QProgressBar, QVBoxLayout,
 )
 
@@ -104,8 +104,11 @@ class Console(QFrame):
         completer.setFilterMode(Qt.MatchFlag.MatchContains)
         self.input.setCompleter(completer)
         self.input.returnPressed.connect(self._submit)
+        self.broadcast = QCheckBox("📡 На все")
+        self.broadcast.setToolTip("Выполнить команду на всех подключённых устройствах в подходящем режиме")
         row.addWidget(prompt)
         row.addWidget(self.input, 1)
+        row.addWidget(self.broadcast)
         row.addWidget(button("▶ Выполнить", self._submit, "accent"))
         lay.addLayout(row)
 

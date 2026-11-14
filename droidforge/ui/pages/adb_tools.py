@@ -7,11 +7,11 @@ import shutil
 import time
 from pathlib import Path
 
-from PyQt6.QtCore import QProcess, QProcessEnvironment, Qt, QUrl
+from PyQt6.QtCore import QPointF, QProcess, QProcessEnvironment, Qt, QTimer, QUrl, pyqtSignal
 from PyQt6.QtGui import QDesktopServices, QPixmap
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QGridLayout, QHBoxLayout, QInputDialog,
-    QLabel, QLineEdit, QListWidgetItem, QMenu, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
+    QAbstractItemView, QCheckBox, QComboBox, QDialog, QFileDialog, QGridLayout, QHBoxLayout, QInputDialog,
+    QLabel, QLineEdit, QListWidget, QListWidgetItem, QMenu, QScrollArea, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
 )
 
 from ..widgets import DropListWidget, button, card, hbox, label, page_header
@@ -81,6 +81,7 @@ class AppsTab(QWidget):
             button("⏹ Остановить", lambda: self._each("shell", "am", "force-stop")),
             button("📤 Извлечь APK", self.extract),
             button("ℹ Инфо", self.info),
+            button("🔑 Разрешения", self.permissions),
             None,
             button("🚫 Отключить", lambda: self._each("shell", "pm", "disable-user", "--user", "0", confirm="Отключить выбранные приложения?")),
             button("✅ Включить", lambda: self._each("shell", "pm", "enable")),
@@ -138,6 +139,16 @@ class AppsTab(QWidget):
         if pkgs and self.app.require_device(shell=True):
             self.app.run([self.app.adb_job("shell", f"dumpsys package {pkgs[0]} | grep -E 'versionName|versionCode|firstInstallTime|lastUpdateTime|targetSdk'")])
 
+    def _intent(self, action: str, data: str) -> None:
+        if self.app.require_device(shell=True):
+            self.app.run([self.app.adb_job("shell", "am", "start", "-a", action, "-d", data)])
+
+    def permissions(self) -> None:
+        pkgs = self.selected()
+        if not pkgs or not self.app.require_device(shell=True):
+            return
+        PermissionsDialog(self.app, pkgs[0], self).exec()
+
     def uninstall(self) -> None:
         pkgs = self.selected()
         if not pkgs or not self.app.require_device(shell=True):
@@ -184,6 +195,11 @@ class AppsTab(QWidget):
         m.addAction("⏹ Остановить", lambda: self._each("shell", "am", "force-stop"))
         m.addAction("📤 Извлечь APK", self.extract)
         m.addAction("ℹ Информация", self.info)
+        m.addAction("🔑 Разрешения", self.permissions)
+        m.addAction("⚙ Открыть настройки приложения", lambda: self._intent(
+            "android.settings.APPLICATION_DETAILS_SETTINGS", f"package:{self.selected()[0]}"))
+        m.addAction("🛒 Открыть в Play Маркете", lambda: self._intent(
+            "android.intent.action.VIEW", f"market://details?id={self.selected()[0]}"))
         m.addAction("📋 Копировать имя", lambda: self.app.clipboard_set("\n".join(self.selected())))
         m.addSeparator()
         m.addAction("🗑 Удалить", self.uninstall)
@@ -418,6 +434,49 @@ class ApkTab(QWidget):
 
 
 # =========================================================================
+class TouchScreen(QLabel):
+    """Shows the device screenshot; clicks become taps, drags become swipes, holds become long presses."""
+
+    gesture = pyqtSignal(str, float, float, float, float, int)  # kind, x1, y1, x2, y2 (0..1), ms
+
+    def __init__(self, text: str = ""):
+        super().__init__(text)
+        self._press: tuple[QPointF, float] | None = None
+        self.setCursor(Qt.CursorShape.CrossCursor)
+
+    def _frac(self, pos: QPointF) -> tuple[float, float] | None:
+        pm = self.pixmap()
+        if pm is None or pm.isNull():
+            return None
+        w, h = pm.width() / pm.devicePixelRatio(), pm.height() / pm.devicePixelRatio()
+        ox, oy = (self.width() - w) / 2, (self.height() - h) / 2
+        x, y = (pos.x() - ox) / w, (pos.y() - oy) / h
+        if not (0 <= x <= 1 and 0 <= y <= 1):
+            return None
+        return x, y
+
+    def mousePressEvent(self, e) -> None:
+        if e.button() == Qt.MouseButton.LeftButton:
+            self._press = (e.position(), time.monotonic())
+
+    def mouseReleaseEvent(self, e) -> None:
+        if not self._press or e.button() != Qt.MouseButton.LeftButton:
+            return
+        start, t0 = self._press
+        self._press = None
+        a, b = self._frac(start), self._frac(e.position())
+        if not a or not b:
+            return
+        ms = int((time.monotonic() - t0) * 1000)
+        moved = (e.position() - start).manhattanLength() > 12
+        if moved:
+            self.gesture.emit("swipe", a[0], a[1], b[0], b[1], max(120, min(ms, 2000)))
+        elif ms > 550:
+            self.gesture.emit("swipe", a[0], a[1], a[0], a[1], 900)  # long press
+        else:
+            self.gesture.emit("tap", a[0], a[1], a[0], a[1], 0)
+
+
 class ScreenTab(QWidget):
     KEYS = [("🏠", 3, "Домой"), ("◀", 4, "Назад"), ("▢", 187, "Недавние"), ("⏻", 26, "Питание"),
             ("🔉", 25, "Громкость −"), ("🔊", 24, "Громкость +"), ("🔇", 164, "Без звука"),
@@ -432,16 +491,26 @@ class ScreenTab(QWidget):
         lay.setSpacing(16)
 
         left = QVBoxLayout()
-        self.screen = QLabel("Нажмите «Скриншот»")
+        self.screen = TouchScreen("Нажмите «Скриншот» или включите Live.\n\nКлик — тап, перетаскивание — свайп,\nудержание — долгое нажатие.")
+        self.screen.gesture.connect(self._gesture)
+        self.live_timer = QTimer(self)
+        self.live_timer.setSingleShot(True)
+        self.live_timer.timeout.connect(lambda: self.take_screenshot(silent=True))
+        self._shot_busy = False
         self.screen.setObjectName("screen")
         self.screen.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.screen.setMinimumSize(260, 360)
         left.addWidget(self.screen, 1)
-        left.addLayout(hbox(button("📸 Скриншот", self.take_screenshot, "accent"),
+        self.live = QCheckBox("🔴 Live")
+        self.live.setToolTip("Автообновление экрана (~1 кадр/с) — управление телефоном без scrcpy")
+        self.live.toggled.connect(self._toggle_live)
+        left.addLayout(hbox(button("📸 Скриншот", self.take_screenshot, "accent"), self.live,
                             button("💾 Сохранить", self.save_screenshot)))
         lay.addLayout(left, 2)
 
-        right = QVBoxLayout()
+        right_w = QWidget()
+        right = QVBoxLayout(right_w)
+        right.setContentsMargins(0, 0, 6, 0)
         right.setSpacing(14)
         c1, l1 = card("🎮 Пульт управления")
         g = QGridLayout()
@@ -480,7 +549,11 @@ class ScreenTab(QWidget):
                           button("🖥 Запустить scrcpy", self.scrcpy, "accent")))
         right.addWidget(c3)
         right.addStretch(1)
-        lay.addLayout(right, 3)
+        right_scroll = QScrollArea()
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        right_scroll.setWidget(right_w)
+        lay.addWidget(right_scroll, 3)
 
     def scrcpy(self) -> None:
         exe = shutil.which("scrcpy") or self.app.config.get("scrcpy_path") or ""
@@ -524,20 +597,47 @@ class ScreenTab(QWidget):
         self.app.run([self.app.adb_job("shell", "input", "text", escaped)])
         self.text.clear()
 
-    def take_screenshot(self) -> None:
-        if not self.app.require_device(shell=True):
+    def take_screenshot(self, silent: bool = False) -> None:
+        dev = self.app.device
+        if not dev or not dev.has_shell:
+            if not silent:
+                self.app.require_device(shell=True)
+            self.live.setChecked(False)
             return
-        self.screen.setText("⏳ Получение скриншота…")
-        self.app.capture_adb(["exec-out", "screencap", "-p"], self._on_shot, merge=False, raw=True)
+        if self._shot_busy:
+            return
+        self._shot_busy = True
+        if not silent and not self.pixmap:
+            self.screen.setText("⏳ Получение скриншота…")
+        self.app.capture_adb(["exec-out", "screencap", "-p"],
+                             lambda c, d: self._on_shot(c, d, silent), merge=False, raw=True)
 
-    def _on_shot(self, code: int, data: bytes) -> None:
+    def _on_shot(self, code: int, data: bytes, silent: bool = False) -> None:
+        self._shot_busy = False
         pm = QPixmap()
         if code == 0 and pm.loadFromData(data, "PNG"):
             self.pixmap = pm
             self._show()
-            self.app.notify("📸 Скриншот получен", "ok")
-        else:
+            if not silent:
+                self.app.notify("📸 Скриншот получен", "ok")
+        elif not silent:
             self.screen.setText("✖ Не удалось получить скриншот")
+        if self.live.isChecked() and self.isVisible():
+            self.live_timer.start(700)
+
+    def _toggle_live(self, on: bool) -> None:
+        if on:
+            self.take_screenshot(silent=True)
+        else:
+            self.live_timer.stop()
+
+    def _gesture(self, kind: str, x1: float, y1: float, x2: float, y2: float, ms: int) -> None:
+        if not self.pixmap or not self.app.device or not self.app.device.has_shell:
+            return
+        w, h = self.pixmap.width(), self.pixmap.height()
+        p = [str(int(x1 * w)), str(int(y1 * h)), str(int(x2 * w)), str(int(y2 * h))]
+        args = ["shell", "input", "tap", p[0], p[1]] if kind == "tap" else ["shell", "input", "swipe", *p, str(ms)]
+        self.app.capture_adb(args, lambda c, o: self.live.isChecked() or QTimer.singleShot(350, lambda: self.take_screenshot(silent=True)))
 
     def _show(self) -> None:
         if self.pixmap:
@@ -657,3 +757,92 @@ class WifiTab(QWidget):
             self.app.notify("Введите адрес и код сопряжения", "warn")
             return
         self.app.run([self.app.adb_job("pair", addr, code, serial=False)])
+
+
+# =========================================================================
+class PermissionsDialog(QDialog):
+    """Runtime permissions of one app: checkbox = granted, toggling calls pm grant / revoke."""
+
+    PERM_RE = re.compile(r"^\s*([\w.]+\.permission\.[\w.]+): granted=(true|false)")
+
+    def __init__(self, app, pkg: str, parent=None):
+        super().__init__(parent)
+        self.app, self.pkg = app, pkg
+        self.setWindowTitle(f"Разрешения · {pkg}")
+        self.resize(620, 560)
+        lay = QVBoxLayout(self)
+        lay.addWidget(label(f"🔑 {pkg}", "h2"))
+        lay.addWidget(label("Отметка = разрешение выдано. Изменения применяются сразу.", "muted"))
+        self.search = QLineEdit()
+        self.search.setPlaceholderText("🔎 Фильтр…")
+        self.search.textChanged.connect(self._filter)
+        lay.addWidget(self.search)
+        self.list = QListWidget()
+        self.list.itemChanged.connect(self._toggled)
+        lay.addWidget(self.list, 1)
+        self.status = label("Загрузка…", "muted")
+        lay.addLayout(hbox(self.status, None,
+                           button("✅ Выдать все", lambda: self._all(True)),
+                           button("🚫 Отозвать все", lambda: self._all(False), "danger"),
+                           button("↺ Сбросить", self._reset, tip="pm reset-permissions — вернуть по умолчанию"),
+                           button("Закрыть", self.accept)))
+        self._loading = True
+        self.load()
+
+    def load(self) -> None:
+        self.app.capture_adb(["shell", f"dumpsys package {self.pkg}"], self._on_dump, timeout=20000)
+
+    def _on_dump(self, code: int, out: str) -> None:
+        perms: dict[str, bool] = {}
+        section = False
+        for line in out.splitlines():
+            if "runtime permissions:" in line:
+                section = True
+                continue
+            if section:
+                m = self.PERM_RE.match(line)
+                if m:
+                    perms[m.group(1)] = m.group(2) == "true"
+                elif line.strip() and not line.startswith(" " * 6):
+                    section = False
+        self._loading = True
+        self.list.clear()
+        for name, granted in sorted(perms.items()):
+            short = name.split(".permission.")[-1]
+            it = QListWidgetItem(f"{short}    ·    {name}")
+            it.setData(Qt.ItemDataRole.UserRole, name)
+            it.setFlags(it.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+            it.setCheckState(Qt.CheckState.Checked if granted else Qt.CheckState.Unchecked)
+            self.list.addItem(it)
+        self._loading = False
+        granted = sum(perms.values())
+        self.status.setText(f"Выдано {granted} из {len(perms)}" if perms else "Нет runtime‑разрешений")
+        self._filter(self.search.text())
+
+    def _filter(self, text: str) -> None:
+        text = text.lower()
+        for i in range(self.list.count()):
+            it = self.list.item(i)
+            it.setHidden(bool(text) and text not in it.text().lower())
+
+    def _toggled(self, item: QListWidgetItem) -> None:
+        if self._loading:
+            return
+        verb = "grant" if item.checkState() == Qt.CheckState.Checked else "revoke"
+        perm = item.data(Qt.ItemDataRole.UserRole)
+        self.app.capture_adb(["shell", "pm", verb, self.pkg, perm], self._after_change)
+
+    def _after_change(self, code: int, out: str) -> None:
+        if code != 0 or "Exception" in out:
+            self.app.notify(f"Не удалось изменить: {out.strip()[:120]}", "error")
+            self.load()
+
+    def _all(self, grant: bool) -> None:
+        verb = "grant" if grant else "revoke"
+        cmds = [f"pm {verb} {self.pkg} {self.list.item(i).data(Qt.ItemDataRole.UserRole)}"
+                for i in range(self.list.count())]
+        if cmds:
+            self.app.capture_adb(["shell", "; ".join(cmds)], lambda c, o: self.load(), timeout=30000)
+
+    def _reset(self) -> None:
+        self.app.capture_adb(["shell", "pm", "reset-permissions", "-p", self.pkg], lambda c, o: self.load())

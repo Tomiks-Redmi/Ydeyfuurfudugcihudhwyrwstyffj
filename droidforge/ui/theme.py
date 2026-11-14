@@ -19,7 +19,28 @@ WARN = "#ffb547"
 
 MONO = '"JetBrains Mono", "Cascadia Code", "Consolas", "DejaVu Sans Mono", "Menlo", monospace'
 
-QSS = f"""
+def rgba(hex_color: str, alpha: float) -> str:
+    """'#rrggbb' -> 'rgba(r,g,b,a)' (Qt reads 8-digit hex as #AARRGGBB, so avoid it)."""
+    h = hex_color.lstrip("#")
+    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
+    return f"rgba({r},{g},{b},{alpha})"
+
+
+ACCENTS = {
+    "Фиолетовый": ("#7c5cff", "#5b8cff"),
+    "Синий": ("#3b82f6", "#06b6d4"),
+    "Бирюзовый": ("#14b8a6", "#22d3ee"),
+    "Изумрудный": ("#10b981", "#84cc16"),
+    "Оранжевый": ("#f97316", "#facc15"),
+    "Розовый": ("#ec4899", "#a855f7"),
+    "Красный": ("#ef4444", "#f97316"),
+}
+
+
+def build_qss(ACCENT: str = ACCENT, ACCENT_3: str = ACCENT_3) -> str:  # noqa: N803 - names reused in the template
+    SEL = rgba(ACCENT, 0.38)  # noqa: N806
+    HOV = rgba(ACCENT, 0.12)  # noqa: N806
+    return f"""
 * {{
     color: {TEXT};
     font-family: "Segoe UI", "Inter", "SF Pro Text", "Ubuntu", "Noto Sans", sans-serif;
@@ -50,7 +71,7 @@ QFrame#card {{ background: {SURFACE}; border: 1px solid {BORDER}; border-radius:
 QFrame#hero {{
     border: 1px solid {BORDER}; border-radius: 16px;
     background: qlineargradient(x1:0, y1:0, x2:1, y2:1,
-        stop:0 rgba(124,92,255,0.28), stop:0.55 {SURFACE}, stop:1 rgba(34,211,238,0.16));
+        stop:0 {rgba(ACCENT, 0.28)}, stop:0.55 {SURFACE}, stop:1 rgba(34,211,238,0.16));
 }}
 QLabel#cardTitle {{ font-size: 11pt; font-weight: 700; }}
 QLabel#h1 {{ font-size: 20pt; font-weight: 800; }}
@@ -82,7 +103,7 @@ QPushButton[kind="accent"] {{
     border: none; color: white; font-weight: 700; padding: 8px 18px;
 }}
 QPushButton[kind="accent"]:hover {{
-    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 #8f74ff, stop:1 #73a0ff);
+    background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {ACCENT_3}, stop:1 {ACCENT});
 }}
 QPushButton[kind="accent"]:disabled {{ background: #2a2f45; color: #6d7488; }}
 QPushButton[kind="danger"] {{
@@ -127,9 +148,9 @@ QListWidget, QTableWidget, QTreeWidget {{
     gridline-color: {BORDER}; alternate-background-color: #111621; outline: 0;
 }}
 QListWidget::item {{ padding: 6px; border-radius: 6px; }}
-QListWidget::item:hover, QTableWidget::item:hover {{ background: rgba(124,92,255,0.12); }}
+QListWidget::item:hover, QTableWidget::item:hover {{ background: {HOV}; }}
 QListWidget::item:selected, QTableWidget::item:selected {{
-    background: rgba(124,92,255,0.38); color: white;
+    background: {SEL}; color: white;
 }}
 QHeaderView::section {{
     background: {SURFACE_2}; border: none; border-bottom: 1px solid {BORDER};
@@ -185,8 +206,4 @@ QLabel#screen {{ background: #080b11; border: 1px solid {BORDER}; border-radius:
 """
 
 
-def rgba(hex_color: str, alpha: float) -> str:
-    """'#rrggbb' -> 'rgba(r,g,b,a)' (Qt reads 8-digit hex as #AARRGGBB, so avoid it)."""
-    h = hex_color.lstrip("#")
-    r, g, b = (int(h[i:i + 2], 16) for i in (0, 2, 4))
-    return f"rgba({r},{g},{b},{alpha})"
+QSS = build_qss()

@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 from PyQt6.QtCore import QUrl
-from PyQt6.QtGui import QDesktopServices
-from PyQt6.QtWidgets import QCheckBox, QFormLayout, QProgressBar, QScrollArea, QSpinBox, QVBoxLayout, QWidget
+from PyQt6.QtGui import QColor, QDesktopServices, QIcon, QPixmap
+from PyQt6.QtWidgets import QCheckBox, QComboBox, QFormLayout, QProgressBar, QScrollArea, QSpinBox, QVBoxLayout, QWidget
 
 from ...core.config import APP_DIR, CONFIG_FILE
 from ...core.logfile import LOG_DIR
 from ...core.tools import EXE, PlatformToolsDownloader, platform_tools_url
+from .. import theme
 from ..widgets import FilePicker, button, card, hbox, label, page_header
 
 
@@ -73,6 +74,16 @@ class SettingsPage(QWidget):
         self.stop_err.toggled.connect(lambda v: app.config.set("stop_on_error", v))
         l3.addLayout(hbox(label("Интервал опроса устройств:", "muted"), self.poll, None))
         l3.addWidget(self.stop_err)
+        self.tray = QCheckBox("Уведомление в трее, когда долгая операция завершилась, а окно свёрнуто")
+        self.tray.setChecked(bool(app.config.get("tray_notify", True)))
+        self.tray.toggled.connect(lambda v: app.config.set("tray_notify", v))
+        l3.addWidget(self.tray)
+        self.accent = QComboBox()
+        for name, (c1_, _c2) in theme.ACCENTS.items():
+            self.accent.addItem(self._swatch(c1_), name)
+        self.accent.setCurrentText(app.config.get("accent", "Фиолетовый"))
+        self.accent.currentTextChanged.connect(self._accent_changed)
+        l3.addLayout(hbox(label("Цвет оформления:", "muted"), self.accent, None))
         l3.addWidget(label(f"Файл настроек: <code>{CONFIG_FILE}</code>", "muted"))
         l3.addWidget(label("Весь вывод консоли сохраняется в журнал сессии — пригодится, если прошивка пошла не так.",
                            "muted", wrap=True))
@@ -90,6 +101,16 @@ class SettingsPage(QWidget):
         lay.addWidget(c4)
         lay.addStretch(1)
         self._show_detected()
+
+    @staticmethod
+    def _swatch(color: str) -> QIcon:
+        pm = QPixmap(16, 16)
+        pm.fill(QColor(color))
+        return QIcon(pm)
+
+    def _accent_changed(self, name: str) -> None:
+        self.app.config.set("accent", name)
+        self.app.apply_accent(name)
 
     def _show_detected(self) -> None:
         t = self.app.tools

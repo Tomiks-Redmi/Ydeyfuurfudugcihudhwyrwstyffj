@@ -61,6 +61,12 @@ PRESETS: dict[str, list[tuple[str, str, str, bool]]] = {
         ("IP адрес", "adb shell ip -f inet addr show wlan0", "", False),
         ("Активное окно", "adb shell \"dumpsys window | grep mCurrentFocus\"", "Какое приложение открыто", False),
         ("Root?", "adb shell \"which su || echo no-root\"", "Проверка наличия su", False),
+        ("Ядро", "adb shell uname -a", "Версия ядра Linux", False),
+        ("SELinux", "adb shell getenforce", "Enforcing / Permissive", False),
+        ("Чипсет", "adb shell getprop ro.soc.model", "Модель SoC", False),
+        ("Project Treble", "adb shell getprop ro.treble.enabled", "Поддержка GSI", False),
+        ("Частоты CPU", "adb shell \"cat /sys/devices/system/cpu/cpu*/cpufreq/scaling_cur_freq\"", "Текущие частоты ядер, кГц", False),
+        ("Время работы", "adb shell uptime", "", False),
     ],
     "🎨 Экран и система": [
         ("Разрешение экрана", "adb shell wm size", "", False),

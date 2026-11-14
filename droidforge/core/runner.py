@@ -18,6 +18,10 @@ from PyQt6.QtCore import QObject, QProcess, QTimer, pyqtSignal
 
 _LINE_SPLIT = re.compile(r"\r\n|\n|\r")
 
+# Pseudo-programs handled inside the runner (used by scripts)
+SLEEP = "__sleep__"
+ECHO = "__echo__"
+
 
 def _quote(arg: str) -> str:
     return f'"{arg}"' if (not arg or any(c in arg for c in " \t|&;<>()")) else arg
@@ -31,6 +35,8 @@ class Job:
     allow_fail: bool = False
 
     def display(self) -> str:
+        if self.program == SLEEP:
+            return f"sleep {self.args[0]}"
         name = Path(self.program).stem or self.program
         return " ".join([name] + [_quote(a) for a in self.args])
 
@@ -79,7 +85,11 @@ class CommandRunner(QObject):
         if not self.busy:
             return
         self._queue.clear()
-        if self._proc is not None:
+        if isinstance(self._proc, QTimer):
+            self._stopped = True
+            self._proc.stop()
+            self._job_done(self._proc, -1)
+        elif self._proc is not None:
             self._stopped = True
             self._proc.kill()
         self.output.emit("⏹ Остановлено пользователем", "info")
@@ -93,6 +103,26 @@ class CommandRunner(QObject):
         self._job = job
         self._stopped = False
         self._buf = {"out": "", "err": ""}
+        if job.program == ECHO:
+            self.output.emit(" ".join(job.args), "info")
+            self._done += 1
+            self.progress.emit(self._done, self._total)
+            self._job = None
+            QTimer.singleShot(0, self._next)
+            return
+        if job.program == SLEEP:
+            self.output.emit(f"❯ {job.display()}", "cmd")
+            timer = QTimer(self)
+            timer.setSingleShot(True)
+            timer.timeout.connect(lambda t=timer: self._job_done(t, 0) if t is self._proc else None)
+            self._proc = timer
+            self._t0 = time.monotonic()
+            try:
+                timer.start(int(float(job.args[0]) * 1000))
+            except (ValueError, IndexError):
+                self.output.emit("✖ sleep: укажите число секунд", "fail")
+                timer.start(0)
+            return
         proc = QProcess(self)
         proc.readyReadStandardOutput.connect(lambda p=proc: self._read(p, "out"))
         proc.readyReadStandardError.connect(lambda p=proc: self._read(p, "err"))
@@ -139,7 +169,7 @@ class CommandRunner(QObject):
             code = -1
         self._job_done(proc, code)
 
-    def _job_done(self, proc: QProcess, code: int) -> None:
+    def _job_done(self, proc, code: int) -> None:
         job = self._job
         elapsed = time.monotonic() - self._t0
         self._done += 1

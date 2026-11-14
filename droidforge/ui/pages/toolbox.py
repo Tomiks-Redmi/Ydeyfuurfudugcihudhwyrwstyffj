@@ -15,12 +15,14 @@ from PyQt6.QtWidgets import (
 from ...core.payload import Payload, PayloadError
 from ...core.workers import HashWorker, PayloadWorker
 from .. import theme
+from .toolbox_extra import DiagnosticsTab, ScriptsTab, TweaksTab
 from ..widgets import FilePicker, button, card, hbox, human_size, label, page_header
 
 
 def _scroll(w: QWidget) -> QScrollArea:
     s = QScrollArea()
     s.setWidgetResizable(True)
+    s.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
     s.setWidget(w)
     return s
 
@@ -70,19 +72,25 @@ class ToolboxPage(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(24, 20, 24, 12)
         lay.setSpacing(14)
-        lay.addLayout(page_header("🧰 Инструменты", "Распаковка OTA, root через Magisk, резервные копии, "
-                                                    "удаление мусорных приложений и проверка контрольных сумм."))
+        lay.addLayout(page_header("🧰 Инструменты", "Твики системы, сценарии, распаковка OTA, root через Magisk, бэкапы, "
+                                                    "debloat, диагностика и контрольные суммы."))
         self.tabs = QTabWidget()
         self.payload_tab = PayloadTab(app)
         self.magisk_tab = MagiskTab(app)
         self.backup_tab = BackupTab(app)
         self.debloat_tab = DebloatTab(app)
         self.hash_tab = HashTab(app)
+        self.tweaks_tab = TweaksTab(app)
+        self.diag_tab = DiagnosticsTab(app)
+        self.scripts_tab = ScriptsTab(app)
+        self.tabs.addTab(_scroll(self.tweaks_tab), "🎛 Твики")
+        self.tabs.addTab(self.scripts_tab, "📜 Сценарии")
         self.tabs.addTab(self.payload_tab, "📦 Payload Dumper")
         self.tabs.addTab(_scroll(self.magisk_tab), "🪄 Root (Magisk)")
         self.tabs.addTab(_scroll(self.backup_tab), "💾 Бэкап")
         self.tabs.addTab(self.debloat_tab, "🧹 Debloat")
-        self.tabs.addTab(_scroll(self.hash_tab), "🔐 Контрольные суммы")
+        self.tabs.addTab(_scroll(self.diag_tab), "🩺 Диагностика")
+        self.tabs.addTab(_scroll(self.hash_tab), "🔐 Хэши")
         lay.addWidget(self.tabs, 1)
 
     def show_tab(self, widget: QWidget) -> None:

@@ -56,6 +56,7 @@ class FlashPage(QWidget):
         self.tabs.addTab(self._tab_folder(), "📁 Прошивка из папки")
         self.tabs.addTab(self._scroll(self._tab_bootloader()), "🔓 Загрузчик")
         self.tabs.addTab(self._scroll(self._tab_sideload()), "📦 Sideload / ZIP")
+        self.tabs.addTab(self._scroll(self._tab_gsi()), "🧬 GSI")
         lay.addWidget(self.tabs, 1)
 
         app.deviceChanged.connect(self._on_device)
@@ -236,6 +237,7 @@ class FlashPage(QWidget):
         self.f_dir.changed.connect(self.scan_folder)
         lay.addWidget(self.f_dir)
 
+        self.f_required: list[str] = []
         self.f_table = QTableWidget(0, 4)
         self.f_table.setHorizontalHeaderLabels(["", "Раздел", "Файл", "Размер"])
         hh = self.f_table.horizontalHeader()
@@ -309,11 +311,31 @@ class FlashPage(QWidget):
             si = QTableWidgetItem(human_size(p.stat().st_size))
             si.setFlags(si.flags() & ~Qt.ItemFlag.ItemIsEditable)
             self.f_table.setItem(row, 3, si)
+        self.f_required = self._read_android_info(root)
         scripts = [s.name for s in root.glob("flash-all.*")] + [s.name for s in root.glob("*.zip")]
         msg = f"Найдено образов: {len(images)}"
         if scripts:
             msg += f"   ·   также в папке: {', '.join(scripts[:4])}"
+        if self.f_required:
+            msg += f"   ·   🎯 для устройства: {', '.join(self.f_required)}"
         self.f_status.setText(msg)
+
+    @staticmethod
+    def _read_android_info(root: Path) -> list[str]:
+        """Board names from android-info.txt ('require board=panther|cheetah')."""
+        for f in [root / "android-info.txt", *root.glob("*/android-info.txt")]:
+            try:
+                for line in f.read_text(errors="replace").splitlines():
+                    key, _, val = line.strip().partition("=")
+                    if key.replace("require", "").strip() in ("board", "product"):
+                        return [b.strip() for b in val.split("|") if b.strip()]
+            except OSError:
+                continue
+        return []
+
+    def _device_codename(self) -> str:
+        props = self.app.page_dashboard.props
+        return (props.get("product") or props.get("ro.product.device") or props.get("ro.product.board") or "").lower()
 
     def _check_all(self, on: bool) -> None:
         state = Qt.CheckState.Checked if on else Qt.CheckState.Unchecked
@@ -329,6 +351,14 @@ class FlashPage(QWidget):
         if not items:
             self.app.notify("Ничего не выбрано", "warn")
             return
+        codename = self._device_codename()
+        if self.f_required and codename and codename not in [b.lower() for b in self.f_required]:
+            if not self.app.confirm("⚠ Прошивка для другого устройства!",
+                                    f"Прошивка предназначена для <b>{', '.join(self.f_required)}</b>, "
+                                    f"а подключено устройство <b>{codename}</b>.<br><br>"
+                                    "Прошивка чужого образа почти наверняка превратит телефон в «кирпич». "
+                                    "Продолжать только если вы точно знаете, что делаете."):
+                return
         names = ", ".join(p for p, _ in items)
         warn = "<br><br><b style='color:#ff4d6d'>Все данные пользователя будут удалены!</b>" if self.f_wipe.isChecked() else ""
         if not self.app.confirm("Прошивка из папки",
@@ -477,3 +507,81 @@ class FlashPage(QWidget):
         pre = self._prepare_fastboot()
         if pre is not None:
             self.app.run(pre + [self.app.fb_job(*args, "update", path, label="fastboot update")])
+
+    # ============================================================ GSI
+    def _tab_gsi(self) -> QWidget:
+        w = QWidget()
+        lay = QVBoxLayout(w)
+        lay.setContentsMargins(18, 18, 18, 18)
+        lay.setSpacing(14)
+        c, cl = card("🧬 Установка GSI (Generic System Image)",
+                     "Чистый Android или кастомная система на любом устройстве с Project Treble. "
+                     "Нужен разблокированный загрузчик. Архивы .xz / .zip сначала распакуйте до .img.")
+        form = QFormLayout()
+        form.setHorizontalSpacing(16)
+        form.setVerticalSpacing(10)
+        self.g_img = FilePicker("Перетащите system.img (GSI)", "Образы (*.img)", exts=(".img",),
+                                config=self.app.config, key="gsi")
+        self.g_vbmeta = FilePicker("vbmeta.img от вашей стоковой прошивки (рекомендуется)", "Образы (*.img)",
+                                   exts=(".img",), config=self.app.config, key="img")
+        form.addRow("GSI образ", self.g_img)
+        form.addRow("vbmeta", self.g_vbmeta)
+        cl.addLayout(form)
+        self.g_product = QCheckBox("Удалить раздел product, если не хватает места (delete-logical-partition)")
+        self.g_wipe = QCheckBox("Сброс данных (обязательно при переходе со стока)")
+        self.g_wipe.setChecked(True)
+        self.g_reboot = QCheckBox("Перезагрузить в систему в конце")
+        self.g_reboot.setChecked(True)
+        for box in (self.g_product, self.g_wipe, self.g_reboot):
+            cl.addWidget(box)
+        cl.addLayout(hbox(button("🔍 Проверить поддержку Treble", self.check_treble), None,
+                          button("🧬 Установить GSI", self.flash_gsi, "accent")))
+        lay.addWidget(c)
+
+        steps, sl = card("📋 Что будет выполнено")
+        sl.addWidget(label(
+            "1. Перезагрузка в bootloader (если нужно)<br>"
+            "2. <code>fastboot --disable-verity --disable-verification flash vbmeta vbmeta.img</code><br>"
+            "3. <code>fastboot reboot fastboot</code> — переход в fastbootd<br>"
+            "4. (опц.) <code>fastboot delete-logical-partition product_a</code><br>"
+            "5. <code>fastboot erase system</code> и <code>fastboot flash system gsi.img</code><br>"
+            "6. <code>fastboot -w</code> и перезагрузка", "muted", wrap=True))
+        lay.addWidget(steps)
+        lay.addStretch(1)
+        return w
+
+    def check_treble(self) -> None:
+        if self.app.require_device(shell=True):
+            self.app.run([self.app.adb_job("shell", "echo treble=$(getprop ro.treble.enabled) "
+                                           "dynamic=$(getprop ro.boot.dynamic_partitions) "
+                                           "ab=$(getprop ro.build.ab_update) arch=$(getprop ro.product.cpu.abi) "
+                                           "vndk=$(getprop ro.vndk.version)")])
+
+    def flash_gsi(self) -> None:
+        img, vbmeta = self.g_img.path(), self.g_vbmeta.path()
+        if not Path(img).is_file():
+            self.app.notify("Выберите GSI образ", "warn")
+            return
+        warn = "<br><b>Все данные будут удалены!</b>" if self.g_wipe.isChecked() else ""
+        if not vbmeta:
+            warn += "<br>⚠ vbmeta не указан — без отключения проверки система может не загрузиться."
+        if not self.app.confirm("Установка GSI", f"Прошить <code>{Path(img).name}</code> в раздел system?{warn}"):
+            return
+        pre = self._prepare_fastboot()
+        if pre is None:
+            return
+        jobs = list(pre)
+        if vbmeta and Path(vbmeta).is_file():
+            jobs.append(self.app.fb_job("--disable-verity", "--disable-verification", "flash", "vbmeta", vbmeta,
+                                        label="vbmeta без проверки"))
+        jobs.append(self.app.fb_job("reboot", "fastboot", label="Переход в fastbootd"))
+        if self.g_product.isChecked():
+            for suffix in ("_a", "_b"):
+                jobs.append(self.app.fb_job("delete-logical-partition", f"product{suffix}", allow_fail=True))
+        jobs.append(self.app.fb_job("erase", "system", allow_fail=True))
+        jobs.append(self.app.fb_job("flash", "system", img, label="Прошивка GSI"))
+        if self.g_wipe.isChecked():
+            jobs.append(self.app.fb_job("-w", label="Сброс данных"))
+        if self.g_reboot.isChecked():
+            jobs.append(self.app.fb_job("reboot"))
+        self.app.run(jobs, stop_on_error=True)

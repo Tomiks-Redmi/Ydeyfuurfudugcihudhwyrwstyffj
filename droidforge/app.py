@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 import sys
+import time
 
 from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QAction, QFont, QIcon, QKeySequence, QPainter, QPixmap, QShortcut, QColor, QLinearGradient
 from PyQt6.QtWidgets import (
     QApplication, QComboBox, QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
-    QMainWindow, QMenu, QMessageBox, QSplitter, QStackedWidget, QToolButton, QVBoxLayout, QWidget,
+    QMainWindow, QMenu, QMessageBox, QSplitter, QStackedWidget, QSystemTrayIcon, QToolButton, QVBoxLayout, QWidget,
 )
 
 from . import __app_name__, __version__
@@ -15,7 +16,7 @@ from .core.commands import NO_SERIAL, all_completions, split_command
 from .core.config import Config
 from .core.devices import Device, DeviceMonitor
 from .core.logfile import SessionLog
-from .core.runner import CommandRunner, Job, capture
+from .core.runner import ECHO, SLEEP, CommandRunner, Job, capture
 from .core.tools import Tools
 from .ui import theme
 from .ui.console import Console
@@ -46,6 +47,8 @@ class MainWindow(QMainWindow):
         self.devices: list[Device] = []
         self._after: list = []
         self.session_log = SessionLog()
+        self.apply_accent(self.config.get("accent", "Фиолетовый"))
+        self._queue_t0 = 0.0
 
         self.setWindowTitle(f"{__app_name__} — ADB & Fastboot Studio")
         self.setWindowIcon(make_icon())
@@ -142,6 +145,12 @@ class MainWindow(QMainWindow):
 
         self.toast = Toast(self)
         self.setAcceptDrops(True)
+        self.tray = None
+        if QSystemTrayIcon.isSystemTrayAvailable():
+            self.tray = QSystemTrayIcon(self.windowIcon(), self)
+            self.tray.setToolTip(__app_name__)
+            self.tray.activated.connect(lambda _r: (self.showNormal(), self.activateWindow()))
+            self.tray.show()
 
     def _build_header(self) -> QFrame:
         header = QFrame(objectName="header")
@@ -176,6 +185,7 @@ class MainWindow(QMainWindow):
         self.runner.output.connect(self.console.write)
         self.console.lineWritten.connect(self.session_log.write)
         self.runner.busyChanged.connect(self.console.set_busy)
+        self.runner.busyChanged.connect(lambda b: b and setattr(self, "_queue_t0", time.monotonic()))
         self.runner.progress.connect(self.console.set_progress)
         self.runner.queueFinished.connect(self._on_queue_finished)
         self.console.commandEntered.connect(self.run_text)
@@ -244,17 +254,18 @@ class MainWindow(QMainWindow):
             self.deviceChanged.emit(dev)
 
     # ==================================================== job helpers
-    def _serial_args(self) -> list[str]:
-        return ["-s", self.device.serial] if self.device else []
+    def _serial_args(self, target: Device | None = None) -> list[str]:
+        dev = target or self.device
+        return ["-s", dev.serial] if dev else []
 
     def adb_job(self, *args: str, label: str = "", allow_fail: bool = False,
-                serial: bool = True) -> Job:
-        pre = self._serial_args() if serial else []
+                serial: bool = True, target: Device | None = None) -> Job:
+        pre = self._serial_args(target) if serial else []
         return Job(self.tools.adb, pre + list(args), label, allow_fail)
 
     def fb_job(self, *args: str, label: str = "", allow_fail: bool = False,
-               serial: bool = True) -> Job:
-        pre = self._serial_args() if serial else []
+               serial: bool = True, target: Device | None = None) -> Job:
+        pre = self._serial_args(target) if serial else []
         return Job(self.tools.fastboot, pre + list(args), label, allow_fail)
 
     def run(self, jobs, stop_on_error: bool | None = None) -> None:
@@ -274,32 +285,74 @@ class MainWindow(QMainWindow):
     def capture_fb(self, args: list[str], cb, **kw):
         return capture(self.tools.fastboot, self._serial_args() + args, cb, **kw)
 
-    def parse_jobs(self, text: str) -> list[Job]:
+    def parse_jobs(self, text: str, target: Device | None = None, strict: bool = True) -> list[Job]:
+        """Parse a command line. With `target`, commands for the wrong tool are skipped (strict=False)."""
+        dev = target or self.device
         jobs: list[Job] = []
         for tokens in split_command(text):
             first = tokens[0].lower()
+            if first in ("sleep", "echo"):
+                jobs.append(Job(SLEEP if first == "sleep" else ECHO, tokens[1:] or ["1"]))
+                continue
             if first in ("adb", "adb.exe"):
                 tool, args = "adb", tokens[1:]
             elif first in ("fastboot", "fastboot.exe"):
                 tool, args = "fastboot", tokens[1:]
             else:  # shorthand: "shell ls", "getvar all" ...
-                tool = "fastboot" if (self.device and self.device.is_fastboot) else "adb"
+                tool = "fastboot" if (dev and dev.is_fastboot) else "adb"
                 args = tokens
             if tool == "adb" and args == ["shell"]:
                 raise ValueError("Интерактивный shell не поддерживается — укажите команду: adb shell ls /sdcard")
+            if not strict and dev and ((tool == "adb" and not dev.is_adb) or (tool == "fastboot" and not dev.is_fastboot)):
+                continue
             need_serial = bool(args) and args[0] not in NO_SERIAL[tool] and "-s" not in args
             maker = self.adb_job if tool == "adb" else self.fb_job
-            jobs.append(maker(*args, serial=need_serial))
+            jobs.append(maker(*args, serial=need_serial, target=target))
+        return jobs
+
+    def parse_script(self, script: str, target: Device | None = None) -> list[Job]:
+        """Multi-line script: one command per line, '#' comments, sleep N, echo text."""
+        jobs: list[Job] = []
+        for n, line in enumerate(script.splitlines(), 1):
+            line = line.strip()
+            if not line or line.startswith("#"):
+                continue
+            try:
+                jobs += self.parse_jobs(line, target, strict=target is None)
+            except ValueError as exc:
+                raise ValueError(f"строка {n}: {exc}") from None
+        return jobs
+
+    def broadcast_jobs(self, text: str, script: bool = False) -> list[Job]:
+        """Build jobs for every connected device that is in a matching mode."""
+        jobs: list[Job] = []
+        for dev in self.devices:
+            if not (dev.is_adb or dev.is_fastboot):
+                continue
+            part = self.parse_script(text, dev) if script else self.parse_jobs(text, dev, strict=False)
+            if part:
+                jobs.append(Job(ECHO, [f"📡 ── {dev.title} ──"]))
+                jobs += part
         return jobs
 
     def run_text(self, text: str) -> None:
         try:
-            jobs = self.parse_jobs(text)
+            if self.console.broadcast.isChecked():
+                jobs = self.broadcast_jobs(text)
+                if not jobs:
+                    self.notify("Нет подходящих устройств для этой команды", "warn")
+                    return
+            else:
+                jobs = self.parse_jobs(text)
         except ValueError as exc:
             self.console.write(f"✖ {exc}", "fail")
             return
         self.config.set("history", self.console.input.history[-200:])
-        self.run(jobs)
+        self.run(jobs, stop_on_error=False if self.console.broadcast.isChecked() else None)
+
+    def apply_accent(self, name: str) -> None:
+        colors = theme.ACCENTS.get(name) or theme.ACCENTS["Фиолетовый"]
+        QApplication.instance().setStyleSheet(theme.build_qss(*colors))
 
     # ======================================================= dialogs
     def require_device(self, *, adb: bool = False, fastboot: bool = False, shell: bool = False) -> bool:
@@ -421,8 +474,13 @@ class MainWindow(QMainWindow):
         callbacks, self._after = self._after, []
         for cb in callbacks:
             cb()
+        long_run = time.monotonic() - self._queue_t0 > 8
         if not self.isActiveWindow():
             QApplication.alert(self)
+            if self.tray and long_run and self.config.get("tray_notify", True):
+                icon = QSystemTrayIcon.MessageIcon.Information if ok else QSystemTrayIcon.MessageIcon.Critical
+                self.tray.showMessage(__app_name__, "✅ Все команды выполнены" if ok else "❌ Выполнение завершилось с ошибкой",
+                                      icon, 6000)
         self.monitor.poll()
 
     def resizeEvent(self, e) -> None:
