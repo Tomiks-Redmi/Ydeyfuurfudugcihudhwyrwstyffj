@@ -41,6 +41,11 @@ class AdbToolsPage(QWidget):
         self.tabs.addTab(self.apk_tab, "📥 Установка APK")
         self.tabs.addTab(self.screen_tab, "🖼 Экран и управление")
         self.tabs.addTab(self.wifi_tab, "📶 ADB по Wi‑Fi")
+        from .adb_extra import PortsTab, ProcessesTab
+        self.proc_tab = ProcessesTab(app)
+        self.ports_tab = PortsTab(app)
+        self.tabs.addTab(self.proc_tab, "Процессы")
+        self.tabs.addTab(self.ports_tab, "Порты")
         lay.addWidget(self.tabs, 1)
 
 
@@ -238,6 +243,7 @@ class FilesTab(QWidget):
             button("📁 Загрузить папку", self.push_folder),
             button("➕ Новая папка", self.mkdir),
             None,
+            button("Редактировать", self.edit_file, tip="Открыть текстовый файл во встроенном редакторе"),
             button("✏ Переименовать", self.rename),
             button("🗑 Удалить", self.delete, "danger"),
         ))
@@ -324,6 +330,15 @@ class FilesTab(QWidget):
         if folder:
             self.push_paths([folder])
 
+    def edit_file(self) -> None:
+        sel = [n for n, is_dir in self._selected() if not is_dir]
+        if len(sel) != 1 or not self.app.require_device(shell=True):
+            self.app.notify("Выберите один файл", "warn")
+            return
+        from .adb_extra import TextEditorDialog
+        TextEditorDialog(self.app, self._remote(sel[0]), self).exec()
+        self.app.after_queue(self.refresh)
+
     def mkdir(self) -> None:
         name, ok = QInputDialog.getText(self, "Новая папка", "Имя папки:")
         if ok and name.strip() and self.app.require_device(shell=True):
@@ -377,6 +392,7 @@ class ApkTab(QWidget):
         lay.addLayout(grid)
         lay.addLayout(hbox(
             button("➕ Добавить APK", self.browse),
+            button("По ссылке…", self.from_url, tip="Скачать APK по прямой ссылке и установить"),
             button("➖ Убрать", self.remove_selected, "ghost"),
             button("🧹 Очистить", self.list.clear, "ghost"),
             None,
@@ -387,17 +403,19 @@ class ApkTab(QWidget):
         existing = {self.list.item(i).data(Qt.ItemDataRole.UserRole) for i in range(self.list.count())}
         for p in paths:
             pp = Path(p)
-            files = sorted(pp.rglob("*.apk")) if pp.is_dir() else [pp]
+            files = sorted(x for x in pp.rglob("*") if x.suffix.lower() in (".apk",) + (".xapk", ".apks", ".apkm")) if pp.is_dir() else [pp]
             for f in files:
-                if f.suffix.lower() == ".apk" and str(f) not in existing:
-                    it = QListWidgetItem(f"📦  {f.name}   ·   {f.stat().st_size / 1048576:.1f} МБ")
+                if f.suffix.lower() in (".apk",) + (".xapk", ".apks", ".apkm") and str(f) not in existing:
+                    kind = "  ·  бандл" if f.suffix.lower() != ".apk" else ""
+                    it = QListWidgetItem(f"{f.name}   ·   {f.stat().st_size / 1048576:.1f} МБ{kind}")
                     it.setData(Qt.ItemDataRole.UserRole, str(f))
                     it.setToolTip(str(f))
                     self.list.addItem(it)
                     existing.add(str(f))
 
     def browse(self) -> None:
-        paths, _ = QFileDialog.getOpenFileNames(self, "Выберите APK", self.app.config.last_dir("apk"), "APK (*.apk)")
+        paths, _ = QFileDialog.getOpenFileNames(self, "Выберите APK", self.app.config.last_dir("apk"),
+                                                "Приложения (*.apk *.xapk *.apks *.apkm)")
         if paths:
             self.app.config.remember_dir("apk", paths[0])
             self.add_paths(paths)
@@ -426,11 +444,54 @@ class ApkTab(QWidget):
             return
         if not self.app.require_device(adb=True):
             return
+        bundles = [f for f in files if f.lower().endswith((".xapk", ".apks", ".apkm"))]
+        files = [f for f in files if f not in bundles]
         if self.o_split.isChecked() and len(files) > 1:
             jobs = [self.app.adb_job("install-multiple", *self._flags(), *files, label="Установка split APK")]
         else:
             jobs = [self.app.adb_job("install", *self._flags(), f, label=f"Установка {Path(f).name}") for f in files]
-        self.app.run(jobs, stop_on_error=False)
+        if jobs:
+            self.app.run(jobs, stop_on_error=False)
+        for b in bundles:
+            self._install_bundle(b)
+
+    def _install_bundle(self, path: str) -> None:
+        from ...core.workers import BundleWorker
+        worker = BundleWorker(path, self)
+        self._workers = getattr(self, "_workers", []) + [worker]
+        self.app.console.write(f"📦 Распаковка бандла {Path(path).name}…", "info")
+
+        def done(apks: list, obbs: list, pkg: str) -> None:
+            jobs = [self.app.adb_job("install-multiple", *self._flags(), *apks,
+                                     label=f"Установка {Path(path).name} ({len(apks)} APK)")]
+            for local, remote in obbs:
+                jobs.append(self.app.adb_job("shell", f"mkdir -p {sh_quote(posixpath.dirname(remote))}"))
+                jobs.append(self.app.adb_job("push", local, remote, label="Копирование OBB"))
+            self.app.run(jobs, stop_on_error=True)
+
+        worker.done.connect(done)
+        worker.failed.connect(lambda e: (self.app.console.write(f"✖ {Path(path).name}: {e}", "fail"),
+                                         self.app.notify("Не удалось распаковать бандл", "error")))
+        worker.start()
+
+    def from_url(self) -> None:
+        url, ok = QInputDialog.getText(self, "Установка по ссылке", "Прямая ссылка на .apk / .xapk / .apks:")
+        url = url.strip()
+        if not ok or not url.startswith(("http://", "https://")):
+            return
+        import tempfile
+        from ...core.workers import DownloadWorker
+        name = url.split("?")[0].rstrip("/").rsplit("/", 1)[-1] or "download.apk"
+        if not name.lower().endswith((".apk",) + (".xapk", ".apks", ".apkm")):
+            name += ".apk"
+        dest = str(Path(tempfile.mkdtemp(prefix="droidforge-dl-")) / name)
+        worker = DownloadWorker(url, dest, self)
+        self._workers = getattr(self, "_workers", []) + [worker]
+        self.app.console.write(f"⬇ Загрузка {name}…", "info")
+        worker.done.connect(lambda p: (self.app.console.write(f"✔ Скачано: {name}", "ok"), self.install_paths([p])))
+        worker.failed.connect(lambda e: (self.app.console.write(f"✖ Загрузка: {e}", "fail"),
+                                         self.app.notify("Не удалось скачать файл", "error")))
+        worker.start()
 
 
 # =========================================================================
@@ -443,6 +504,7 @@ class TouchScreen(QLabel):
         super().__init__(text)
         self._press: tuple[QPointF, float] | None = None
         self.setCursor(Qt.CursorShape.CrossCursor)
+        self.setFocusPolicy(Qt.FocusPolicy.ClickFocus)
 
     def _frac(self, pos: QPointF) -> tuple[float, float] | None:
         pm = self.pixmap()
@@ -455,8 +517,22 @@ class TouchScreen(QLabel):
             return None
         return x, y
 
+    KEYMAP = {Qt.Key.Key_Backspace: 67, Qt.Key.Key_Return: 66, Qt.Key.Key_Enter: 66, Qt.Key.Key_Tab: 61,
+              Qt.Key.Key_Escape: 4, Qt.Key.Key_Left: 21, Qt.Key.Key_Right: 22, Qt.Key.Key_Up: 19, Qt.Key.Key_Down: 20,
+              Qt.Key.Key_Delete: 112, Qt.Key.Key_Home: 3, Qt.Key.Key_PageUp: 92, Qt.Key.Key_PageDown: 93}
+    typed = pyqtSignal(str, int)   # text chunk, or keycode
+
+    def keyPressEvent(self, e) -> None:
+        if e.key() in self.KEYMAP:
+            self.typed.emit("", self.KEYMAP[e.key()])
+        elif e.text() and e.text().isprintable():
+            self.typed.emit(e.text(), 0)
+        else:
+            super().keyPressEvent(e)
+
     def mousePressEvent(self, e) -> None:
         if e.button() == Qt.MouseButton.LeftButton:
+            self.setFocus()
             self._press = (e.position(), time.monotonic())
 
     def mouseReleaseEvent(self, e) -> None:
@@ -491,8 +567,14 @@ class ScreenTab(QWidget):
         lay.setSpacing(16)
 
         left = QVBoxLayout()
-        self.screen = TouchScreen("Нажмите «Скриншот» или включите Live.\n\nКлик — тап, перетаскивание — свайп,\nудержание — долгое нажатие.")
+        self.screen = TouchScreen("Нажмите «Скриншот» или включите Live.\n\nКлик — тап, перетаскивание — свайп,\nудержание — долгое нажатие.\nПосле клика можно печатать с клавиатуры ПК.")
         self.screen.gesture.connect(self._gesture)
+        self.screen.typed.connect(self._typed)
+        self._type_buf = ""
+        self._type_timer = QTimer(self)
+        self._type_timer.setSingleShot(True)
+        self._type_timer.setInterval(180)
+        self._type_timer.timeout.connect(self._flush_typed)
         self.live_timer = QTimer(self)
         self.live_timer.setSingleShot(True)
         self.live_timer.timeout.connect(lambda: self.take_screenshot(silent=True))
@@ -608,7 +690,7 @@ class ScreenTab(QWidget):
             return
         self._shot_busy = True
         if not silent and not self.pixmap:
-            self.screen.setText("⏳ Получение скриншота…")
+            self.screen.setText("Получение скриншота…")
         self.app.capture_adb(["exec-out", "screencap", "-p"],
                              lambda c, d: self._on_shot(c, d, silent), merge=False, raw=True)
 
@@ -630,6 +712,25 @@ class ScreenTab(QWidget):
             self.take_screenshot(silent=True)
         else:
             self.live_timer.stop()
+
+    def _typed(self, text: str, code: int) -> None:
+        """Keyboard focus on the screenshot: printable text is batched, special keys sent at once."""
+        if not self.app.device or not self.app.device.has_shell:
+            return
+        if code:
+            self._flush_typed()
+            self.app.capture_adb(["shell", "input", "keyevent", str(code)],
+                                 lambda c, o: self.live.isChecked() or QTimer.singleShot(250, lambda: self.take_screenshot(silent=True)))
+        else:
+            self._type_buf += text
+            self._type_timer.start()
+
+    def _flush_typed(self) -> None:
+        if not self._type_buf:
+            return
+        txt, self._type_buf = self._type_buf, ""
+        escaped = re.sub(r"([\\\"'`$&|;<>()*?#~!\[\]{}])", r"\\\1", txt).replace(" ", "%s")
+        self.app.capture_adb(["shell", "input", "text", escaped], lambda c, o: None)
 
     def _gesture(self, kind: str, x1: float, y1: float, x2: float, y2: float, ms: int) -> None:
         if not self.pixmap or not self.app.device or not self.app.device.has_shell:

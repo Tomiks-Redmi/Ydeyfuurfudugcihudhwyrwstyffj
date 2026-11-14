@@ -13,7 +13,7 @@ from PyQt6.QtWidgets import (
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from .. import theme
+from .. import icons, theme
 from ..widgets import Tile, button, card, hbox, label
 
 ADB_FIELDS = [
@@ -70,7 +70,8 @@ class DashboardPage(QWidget):
         hero, hl = card(name="hero")
         row = QHBoxLayout()
         row.setSpacing(18)
-        self.icon = label("📱", "bigIcon")
+        self.icon = label("", "bigIcon")
+        icons.bind(self.icon, "phone", "accent", 40)
         row.addWidget(self.icon)
         col = QVBoxLayout()
         col.setSpacing(4)
@@ -245,12 +246,12 @@ class DashboardPage(QWidget):
         self.hint.hide()
         self.guide.setVisible(dev is None)
         if dev is None:
-            self.icon.setText("📱")
+            icons.bind(self.icon, "phone", "accent", 40)
             self.title.setText("Устройство не подключено")
             self.subtitle.setText("Подключите телефон по USB и включите «Отладку по USB» в параметрах разработчика.")
             self._fill_grid([])
             return
-        self.icon.setText("⚡" if dev.is_fastboot else "🛠" if dev.mode == "recovery" else "📱")
+        icons.bind(self.icon, "bolt" if dev.is_fastboot else "lifebuoy" if dev.mode == "recovery" else "phone", "accent", 40)
         self.title.setText(dev.model.replace("_", " ") or dev.product or "Android устройство")
         self.subtitle.setText(f"{dev.serial}   ·   режим: {dev.mode_name}   ·   {'Wi‑Fi' if dev.transport == 'wifi' else 'USB'}")
         if dev.mode == "unauthorized":
@@ -268,12 +269,12 @@ class DashboardPage(QWidget):
     def toggle_monitor(self) -> None:
         if self.mon_timer.isActive():
             self.mon_timer.stop()
-            self.mon_btn.setText("▶ Включить")
+            self.mon_btn.setText("Включить")
             return
         if not self.app.require_device(shell=True):
             return
         self.mon_timer.start()
-        self.mon_btn.setText("⏸ Выключить")
+        self.mon_btn.setText("Выключить")
         self._poll_monitor()
 
     def _poll_monitor(self) -> None:
@@ -407,7 +408,7 @@ class DashboardPage(QWidget):
         temp = re.search(r"temperature:\s*(\d+)", out)
         charging = re.search(r"status:\s*2\b", out)
         if level:
-            txt = f"{'⚡' if charging else '🔋'} {level.group(1)}%"
+            txt = f"{level.group(1)}%" + (" ↑" if charging else "")
             if temp:
                 txt += f"  ·  {int(temp.group(1)) / 10:.1f}°C"
             self.battery.setText(txt)

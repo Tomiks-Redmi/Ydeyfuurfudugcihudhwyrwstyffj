@@ -81,7 +81,7 @@ class SettingsPage(QWidget):
         self.accent = QComboBox()
         for name, (c1_, _c2) in theme.ACCENTS.items():
             self.accent.addItem(self._swatch(c1_), name)
-        self.accent.setCurrentText(app.config.get("accent", "Фиолетовый"))
+        self.accent.setCurrentText(app.config.get("accent", "Индиго"))
         self.accent.currentTextChanged.connect(self._accent_changed)
         self.mode = QComboBox()
         for text, key in (("🌙 Тёмная", "dark"), ("☀ Светлая", "light"), ("💻 Как в системе", "system")):
@@ -93,6 +93,14 @@ class SettingsPage(QWidget):
         self.auto_expand.setChecked(bool(app.config.get("console_auto_expand", True)))
         self.auto_expand.toggled.connect(lambda v: app.config.set("console_auto_expand", v))
         l3.addWidget(self.auto_expand)
+        self.autorun = QComboBox()
+        self.autorun.addItem("ничего не делать", "")
+        for sc in app.config.get("scripts", []):
+            self.autorun.addItem(f"сценарий: {sc['name']}", sc["name"])
+        idx = self.autorun.findData(app.config.get("autorun_script", ""))
+        self.autorun.setCurrentIndex(max(0, idx))
+        self.autorun.currentIndexChanged.connect(lambda _i: app.config.set("autorun_script", self.autorun.currentData()))
+        l3.addLayout(hbox(label("При подключении устройства (ADB):", "muted"), self.autorun, None))
         l3.addWidget(label(f"Файл настроек: <code>{CONFIG_FILE}</code>", "muted"))
         l3.addWidget(label("Весь вывод консоли сохраняется в журнал сессии — пригодится, если прошивка пошла не так.",
                            "muted", wrap=True))

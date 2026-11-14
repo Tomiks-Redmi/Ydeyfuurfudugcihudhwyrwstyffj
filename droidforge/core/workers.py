@@ -98,3 +98,131 @@ class PayloadWorker(QThread):
         finally:
             payload.close()
         self.finishedAll.emit(ok, self.out_dir)
+
+
+class DecompressWorker(QThread):
+    """Unpack .img.xz / .img.gz / .zip (largest .img inside) next to the source file."""
+
+    progress = pyqtSignal(int, int)
+    done = pyqtSignal(str)       # path to the .img
+    failed = pyqtSignal(str)
+
+    def __init__(self, path: str, parent=None):
+        super().__init__(parent)
+        self.path = path
+
+    @staticmethod
+    def needs(path: str) -> bool:
+        return path.lower().endswith((".xz", ".gz", ".zip"))
+
+    def run(self) -> None:
+        import gzip
+        import lzma
+        import zipfile
+        src = Path(self.path)
+        try:
+            low = src.name.lower()
+            if low.endswith(".zip"):
+                with zipfile.ZipFile(src) as zf:
+                    imgs = [i for i in zf.infolist() if i.filename.lower().endswith(".img") and not i.is_dir()]
+                    if not imgs:
+                        raise OSError("В архиве нет .img")
+                    info = max(imgs, key=lambda i: i.file_size)
+                    dest = src.with_name(Path(info.filename).name)
+                    total = info.file_size
+                    with zf.open(info) as fin, open(dest, "wb") as fout:
+                        self._copy(fin, fout, total)
+            else:
+                opener = lzma.open if low.endswith(".xz") else gzip.open
+                dest = src.with_suffix("") if src.suffix.lower() in (".xz", ".gz") else src.with_name(src.stem)
+                if dest.suffix.lower() != ".img":
+                    dest = dest.with_suffix(dest.suffix + ".img") if dest.suffix else dest.with_suffix(".img")
+                total = src.stat().st_size
+                with open(src, "rb") as raw, opener(raw) as fin, open(dest, "wb") as fout:
+                    self._copy(fin, fout, total, raw)
+            self.done.emit(str(dest))
+        except (OSError, EOFError, lzma.LZMAError, zipfile.BadZipFile) as exc:
+            self.failed.emit(str(exc))
+
+    def _copy(self, fin, fout, total: int, raw=None) -> None:
+        while True:
+            chunk = fin.read(4 << 20)
+            if not chunk:
+                break
+            fout.write(chunk)
+            pos = raw.tell() if raw is not None else fout.tell()
+            self.progress.emit(min(pos, total), total)
+
+
+class BundleWorker(QThread):
+    """Extract split-APK bundles (.apks / .xapk / .apkm) into a temp folder."""
+
+    done = pyqtSignal(list, list, str)   # apk paths, (obb_local, obb_remote) pairs, package
+    failed = pyqtSignal(str)
+
+    def __init__(self, path: str, parent=None):
+        super().__init__(parent)
+        self.path = path
+
+    def run(self) -> None:
+        import json
+        import tempfile
+        import zipfile
+        try:
+            out = Path(tempfile.mkdtemp(prefix="droidforge-bundle-"))
+            apks, obbs, pkg = [], [], ""
+            with zipfile.ZipFile(self.path) as zf:
+                root = out.resolve()
+                for info in zf.infolist():
+                    target = (out / info.filename).resolve()
+                    if not str(target).startswith(str(root)) or info.is_dir():
+                        continue
+                    name = info.filename.lower()
+                    if name.endswith(".apk") or name.endswith(".obb") or name == "manifest.json":
+                        zf.extract(info, out)
+                        if name.endswith(".apk"):
+                            apks.append(str(target))
+                        elif name.endswith(".obb"):
+                            rel = info.filename.split("Android/obb/", 1)[-1]
+                            obbs.append((str(target), "/sdcard/Android/obb/" + rel))
+                manifest = out / "manifest.json"
+                if manifest.exists():
+                    try:
+                        pkg = json.loads(manifest.read_text(encoding="utf-8")).get("package_name", "")
+                    except ValueError:
+                        pass
+            if not apks:
+                raise OSError("В архиве нет APK (возможно, он зашифрован)")
+            base = [a for a in apks if Path(a).name.lower() in ("base.apk", f"{pkg}.apk".lower())]
+            apks = base + [a for a in apks if a not in base]
+            self.done.emit(apks, obbs, pkg)
+        except (OSError, zipfile.BadZipFile) as exc:
+            self.failed.emit(str(exc))
+
+
+class DownloadWorker(QThread):
+    progress = pyqtSignal(int, int)
+    done = pyqtSignal(str)
+    failed = pyqtSignal(str)
+
+    def __init__(self, url: str, dest: str, parent=None):
+        super().__init__(parent)
+        self.url, self.dest = url, dest
+
+    def run(self) -> None:
+        import urllib.request
+        try:
+            req = urllib.request.Request(self.url, headers={"User-Agent": "Mozilla/5.0 DroidForge"})
+            with urllib.request.urlopen(req, timeout=30) as resp, open(self.dest, "wb") as out:
+                total = int(resp.headers.get("Content-Length") or 0)
+                got = 0
+                while True:
+                    chunk = resp.read(256 * 1024)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+                    got += len(chunk)
+                    self.progress.emit(got, total)
+            self.done.emit(self.dest)
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(str(exc))

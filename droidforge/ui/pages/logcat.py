@@ -50,7 +50,9 @@ class LogcatPage(QWidget):
         self.package.setToolTip("Показывать только логи процесса этого приложения (по PID, применяется при старте)")
         self.autoscroll = QCheckBox("Автопрокрутка")
         self.autoscroll.setChecked(True)
-        top = hbox(self.start_btn, self.level, self.filter, self.regex, self.package)
+        self.crash_btn = button("Только сбои", self.crash_filter, "ghost",
+                                "Показать только падения приложений, ANR и нативные сбои")
+        top = hbox(self.start_btn, self.level, self.filter, self.regex, self.package, self.crash_btn)
         top.setStretch(2, 1)
         lay.addLayout(top)
 
@@ -106,7 +108,7 @@ class LogcatPage(QWidget):
         self.proc.finished.connect(self._on_finished)
         self.proc.start(self.app.tools.adb, args)
         self._flush_timer.start()
-        self.start_btn.setText("⏸ Стоп")
+        self.start_btn.setText("Стоп")
         self.start_btn.setProperty("kind", "danger")
         self._repolish()
         self.stats.setText("● Запись…" + (f"  (PID {pid})" if pid else ""))
@@ -126,10 +128,19 @@ class LogcatPage(QWidget):
             self.proc = None
         self.flush()
         self._flush_timer.stop()
-        self.start_btn.setText("▶ Старт")
+        self.start_btn.setText("Старт")
         self.start_btn.setProperty("kind", "accent")
         self._repolish()
         self.stats.setText(f"Остановлено · строк в буфере: {len(self.lines)}")
+
+    def crash_filter(self) -> None:
+        if self.regex.isChecked() and "FATAL" in self.filter.text():
+            self.filter.clear()
+            self.regex.setChecked(False)
+            return
+        self.level.setCurrentIndex(0)
+        self.regex.setChecked(True)
+        self.filter.setText(r"FATAL EXCEPTION|AndroidRuntime|ANR in|Fatal signal|DEBUG\s*:|Process: ")
 
     def _repolish(self) -> None:
         self.start_btn.style().unpolish(self.start_btn)

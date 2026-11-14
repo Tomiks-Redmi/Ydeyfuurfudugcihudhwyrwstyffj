@@ -10,6 +10,7 @@ from PyQt6.QtWidgets import (
     QProgressBar, QVBoxLayout,
 )
 
+from . import icons
 from .widgets import button, label
 
 # The terminal is dark in both themes, so its colors are fixed.
@@ -182,14 +183,14 @@ class Console(QFrame):
         self.view.setVisible(not collapsed)
         self.input_row.setVisible(not collapsed)
         self.last_line.setVisible(collapsed)
-        self.toggle_btn.setText("▴" if collapsed else "▾")
+        icons.bind(self.toggle_btn, "chevron-up" if collapsed else "chevron-down")
         if collapsed:
             last = self.view.document().lastBlock().text()
             self.last_line.setText(last)
 
     def set_busy(self, busy: bool) -> None:
         self.stop_btn.setEnabled(busy)
-        self.status.setText("⏳ Выполняется…" if busy else "Готов")
+        self.status.setText("Выполняется…" if busy else "Готов")
         if not busy:
             self.progress.hide()
 

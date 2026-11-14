@@ -1,6 +1,8 @@
 """Reusable widgets and small helpers."""
 from __future__ import annotations
 
+import re
+
 from pathlib import Path
 from typing import Callable
 
@@ -11,12 +13,45 @@ from PyQt6.QtWidgets import (
     QListWidget, QPushButton, QSizePolicy, QVBoxLayout, QWidget,
 )
 
-from . import theme
+from . import icons, theme
+
+# Leading emoji / pictographs / dingbats (plus keycaps, ZWJ, variation selectors) are stripped from UI
+# text for the minimal look. Text that consists only of such symbols is left untouched.
+_EMOJI = (r"[\U0001F000-\U0001FAFF\u2190-\u21FF\u2300-\u23FF\u2460-\u24FF\u25A0-\u27FF\u2900-\u297F"
+          r"\u2B00-\u2BFF\uFE0F\u200D\u20E3]|[0-9#*]\uFE0F?\u20E3")
+_LEAD = re.compile(rf"^(?:{_EMOJI}|\s)+")
+_GLYPH_ICONS = {
+    "⟳": "refresh", "🔄": "refresh", "🕘": "history", "☀": "sun", "🌙": "moon", "📋": "copy", "🧹": "trash",
+    "▾": "chevron-down", "▴": "chevron-up", "←": "arrow-left", "✖": "x", "⬆": "chevron-up", "💾": "save",
+    "🗑": "trash", "🏠": "home", "◀": "chevron-left", "▢": "square", "⏻": "power", "🔉": "vol-down",
+    "🔊": "vol-up", "🔇": "mute", "🔓": "unlock", "📷": "camera", "⏯": "playpause", "»": "chevron-right",
+}
+
+
+def clean(text: str) -> str:
+    """Strip leading emoji for the minimal style (keeps symbol-only strings)."""
+    if not text:
+        return text
+    rest = _LEAD.sub("", text)
+    return rest if rest.strip() else text
+
+
+def strip_all(text: str) -> str:
+    """Remove emoji anywhere in a short UI string (used for tabs, checkboxes, combo items)."""
+    out = re.sub(_EMOJI, "", text)
+    out = re.sub(r"\s{2,}", " ", out).strip()
+    return out or text
 
 
 def button(text: str, slot: Callable | None = None, kind: str | None = None,
-           tip: str | None = None) -> QPushButton:
-    b = QPushButton(text)
+           tip: str | None = None, icon: str | None = None) -> QPushButton:
+    glyph = text.strip()
+    if icon is None and glyph in _GLYPH_ICONS:
+        icon, text = _GLYPH_ICONS[glyph], ""
+        kind = kind if kind in ("icon", "key", "danger") else "icon"
+    b = QPushButton(clean(text))
+    if icon:
+        icons.bind(b, icon, "white" if kind == "accent" else "danger" if kind == "danger" else "muted", 17)
     b.setCursor(Qt.CursorShape.PointingHandCursor)
     if kind:
         b.setProperty("kind", kind)
@@ -27,8 +62,11 @@ def button(text: str, slot: Callable | None = None, kind: str | None = None,
     return b
 
 
+_CLEAN_NAMES = {"h1", "h2", "cardTitle", "category", "toolTitle", "tileTitle", "crumb", "devName"}
+
+
 def label(text: str = "", name: str | None = None, wrap: bool = False) -> QLabel:
-    lbl = QLabel(text)
+    lbl = QLabel(clean(text) if name in _CLEAN_NAMES else text)
     if name:
         lbl.setObjectName(name)
     lbl.setWordWrap(wrap)
@@ -263,9 +301,9 @@ class Toast(QLabel):
     def show_message(self, text: str, kind: str = "info", ms: int = 3200) -> None:
         border, bg = self.COLORS.get(kind, self.COLORS["info"])
         self.setStyleSheet(
-            f"QLabel#toast {{ background: {theme.SURFACE_2}; border: 1px solid {border};"
-            f" border-left: 4px solid {border}; color: {theme.TEXT}; }}")
-        self.setText(text)
+            f"QLabel#toast {{ background: {theme.SURFACE}; border: 1px solid {theme.BORDER};"
+            f" border-left: 3px solid {border}; color: {theme.TEXT}; }}")
+        self.setText(clean(text))
         self.adjustSize()
         parent = self.parentWidget()
         self.move(parent.width() - self.width() - 24, 76)
@@ -302,13 +340,17 @@ class ToolCard(QFrame):
         self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
-        self.setMinimumHeight(118)
+        self.setMinimumHeight(96)
         lay = QHBoxLayout(self)
         lay.setContentsMargins(16, 16, 16, 16)
         lay.setSpacing(14)
-        ic = label(icon, "toolIcon")
-        ic.setFixedSize(56, 56)
+        ic = label("", "toolIcon")
+        ic.setFixedSize(44, 44)
         ic.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        if icons.has(icon):
+            icons.bind(ic, icon, "accent", 22)
+        else:
+            ic.setText(icon)
         lay.addWidget(ic, 0, Qt.AlignmentFlag.AlignTop)
         col = QVBoxLayout()
         col.setSpacing(4)

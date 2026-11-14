@@ -7,7 +7,7 @@ from pathlib import Path
 from PyQt6.QtCore import Qt
 from PyQt6.QtGui import QFont
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QComboBox, QFileDialog, QGridLayout, QHeaderView, QInputDialog, QLineEdit,
+    QAbstractItemView, QComboBox, QFileDialog, QSlider, QGridLayout, QHeaderView, QInputDialog, QLineEdit,
     QListWidget, QListWidgetItem, QPlainTextEdit, QSpinBox, QSplitter, QTableWidget, QTableWidgetItem,
     QVBoxLayout, QWidget,
 )
@@ -118,6 +118,35 @@ class TweaksTab(QWidget):
             net.addWidget(button(off_txt, lambda c=cmd_off: self._sh(c)), i, 1)
         l4.addLayout(net)
         grid.addWidget(c4, 1, 1)
+
+        c6, l6 = card("Яркость и громкость", "Применяется, когда отпускаете ползунок.")
+        self.bright = QSlider(Qt.Orientation.Horizontal)
+        self.bright.setRange(1, 255)
+        self.bright.setValue(128)
+        self.bright.sliderReleased.connect(lambda: self._sh(
+            f"settings put system screen_brightness_mode 0; settings put system screen_brightness {self.bright.value()}"))
+        self.volume = QSlider(Qt.Orientation.Horizontal)
+        self.volume.setRange(0, 15)
+        self.volume.setValue(8)
+        self.volume.sliderReleased.connect(lambda: self._sh(
+            f"cmd media_session volume --stream 3 --set {self.volume.value()} || media volume --stream 3 --set {self.volume.value()}"))
+        l6.addLayout(hbox(label("Яркость", "muted"), self.bright,
+                          button("Авто", lambda: self._sh("settings put system screen_brightness_mode 1"), "ghost")))
+        l6.addLayout(hbox(label("Громкость медиа", "muted"), self.volume))
+        grid.addWidget(c6, 2, 0)
+
+        c7, l7 = card("Режим разработчика", "Полезные переключатели без копания в меню.")
+        for on_txt, cmd_on, cmd_off in [
+            ("Границы элементов (layout bounds)", "setprop debug.layout true; service call activity 1599295570",
+             "setprop debug.layout false; service call activity 1599295570"),
+            ("Профиль GPU (полосы)", "setprop debug.hwui.profile visual_bars; service call activity 1599295570",
+             "setprop debug.hwui.profile false; service call activity 1599295570"),
+            ("Не хранить activity", "settings put global always_finish_activities 1",
+             "settings put global always_finish_activities 0"),
+        ]:
+            l7.addLayout(hbox(label(on_txt), None, button("Вкл", lambda c=cmd_on: self._sh(c)),
+                              button("Выкл", lambda c=cmd_off: self._sh(c), "ghost")))
+        grid.addWidget(c7, 2, 1)
         lay.addLayout(grid)
 
         # settings DB editor
@@ -300,6 +329,7 @@ class DiagnosticsTab(QWidget):
                           button("💽 Что занимает место", lambda: self._run_view(
                               "echo '== /sdcard =='; du -sh /sdcard/* 2>/dev/null | sort -rh | head -25; "
                               "echo; echo '== Разделы =='; df -h /data /system 2>/dev/null", "Занятое место")),
+                          button("Железо", self.hardware),
                           button("🌐 Проверка сети", lambda: self._run_view(
                               "ping -c 4 -W 2 8.8.8.8 2>&1; echo; ping -c 2 -W 2 google.com 2>&1 | tail -3", "Проверка интернета")),
                           None))
@@ -315,6 +345,10 @@ class DiagnosticsTab(QWidget):
         for i, (name, intent) in enumerate(HIDDEN):
             menu_row.addWidget(button(name, lambda it=intent: self._start(it)), i // 4, i % 4)
         l2.addLayout(menu_row)
+        self.notif = QLineEdit()
+        self.notif.setPlaceholderText("Текст уведомления на телефон")
+        self.notif.returnPressed.connect(self.send_notification)
+        l2.addLayout(hbox(self.notif, button("Отправить уведомление", self.send_notification)))
         top.addWidget(c2, 0, 1)
         top.setColumnStretch(1, 2)
         lay.addLayout(top)
@@ -353,12 +387,34 @@ class DiagnosticsTab(QWidget):
         l3.addWidget(split, 1)
         lay.addWidget(c3, 1)
 
+    def send_notification(self) -> None:
+        text = self.notif.text().strip() or "Привет от DroidForge"
+        if self.app.require_device(shell=True):
+            self.app.run([self.app.adb_job("shell", f"cmd notification post -S bigtext -t DroidForge droidforge {sh_quote(text)}")])
+            self.notif.clear()
+
+    def hardware(self) -> None:
+        cmd = ("echo '== Устройство =='; echo \"$(getprop ro.product.manufacturer) $(getprop ro.product.model) "
+               "($(getprop ro.product.device))\"; echo \"Android $(getprop ro.build.version.release), SDK "
+               "$(getprop ro.build.version.sdk), патч $(getprop ro.build.version.security_patch)\"; echo; "
+               "echo '== Процессор =='; echo \"SoC: $(getprop ro.soc.manufacturer) $(getprop ro.soc.model) / "
+               "$(getprop ro.board.platform)\"; echo \"ABI: $(getprop ro.product.cpu.abilist)\"; "
+               "echo \"Ядер: $(grep -c ^processor /proc/cpuinfo)\"; for c in /sys/devices/system/cpu/cpu[0-9]*; do "
+               "f=$(cat $c/cpufreq/cpuinfo_max_freq 2>/dev/null); [ -n \"$f\" ] && echo \"  $(basename $c): до $((f/1000)) МГц\"; "
+               "done; echo; echo '== Память =='; grep -E 'MemTotal|MemAvailable|SwapTotal' /proc/meminfo; df -h /data | tail -n 1; "
+               "echo; echo '== Экран =='; wm size; wm density; dumpsys display | grep -m 3 -oE 'fps=[0-9.]+|refreshRate [0-9.]+' | sort -u; "
+               "echo; echo '== Ядро и безопасность =='; uname -r; echo \"SELinux: $(getenforce)\"; "
+               "echo \"Treble: $(getprop ro.treble.enabled), A/B: $(getprop ro.build.ab_update), "
+               "Verified boot: $(getprop ro.boot.verifiedbootstate)\"; echo; echo '== Сенсоры =='; "
+               "dumpsys sensorservice | grep -E '^0x[0-9a-f]+\\)' | sed -E 's/^0x[0-9a-f]+\\) //; s/\\|.*//' | head -40")
+        self._run_view(cmd, "Железо")
+
     def battery_health(self) -> None:
         cmd = ("dumpsys battery; echo @@; B=/sys/class/power_supply/battery; "
                "for f in cycle_count charge_full charge_full_design health voltage_now current_now temp; do "
                "[ -r $B/$f ] && echo \"$f=$(cat $B/$f)\"; done")
         if self.app.require_device(shell=True):
-            self.view_title.setText("⏳ Батарея…")
+            self.view_title.setText("Батарея…")
             self.app.capture_adb(["shell", cmd], self._on_battery)
 
     def _on_battery(self, code: int, out: str) -> None:
@@ -408,7 +464,7 @@ class DiagnosticsTab(QWidget):
     def _run_view(self, cmd: str, title: str) -> None:
         if not self.app.require_device(shell=True):
             return
-        self.view_title.setText(f"⏳ {title}…")
+        self.view_title.setText(f"{title}…")
         self.app.capture_adb(["shell", cmd], lambda c, out: self._show(title, out), timeout=60000)
 
     def _show(self, title: str, text: str) -> None:

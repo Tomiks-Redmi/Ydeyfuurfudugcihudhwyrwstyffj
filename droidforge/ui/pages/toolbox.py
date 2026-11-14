@@ -66,14 +66,14 @@ def _checked_rows(table: QTableWidget) -> list[int]:
 
 
 TOOLS = [  # attribute, icon, title, description, needs scroll
-    ("tweaks_tab", "🎛", "Твики системы", "DPI, разрешение, частота экрана, анимации, Private DNS и редактор настроек Android", True),
-    ("scripts_tab", "📜", "Сценарии", "Свои макросы из нескольких команд — на одном или сразу на всех устройствах", False),
-    ("payload_tab", "📦", "Payload Dumper", "Извлечь boot.img, init_boot.img и другие образы из OTA‑прошивки", False),
-    ("magisk_tab", "🪄", "Root через Magisk", "Мастер из 5 шагов: пропатчить boot.img в Magisk и прошить", True),
-    ("backup_tab", "💾", "Резервные копии", "Разделы (EFS, persist, modem), папки с телефона и APK приложений", True),
-    ("debloat_tab", "🧹", "Debloat", "Убрать рекламу и мусорные приложения Xiaomi, Samsung, Facebook, Google", False),
-    ("diag_tab", "🩺", "Диагностика", "Bugreport, журнал сбоев, dumpsys, температуры и скрытые меню", True),
-    ("hash_tab", "🔐", "Контрольные суммы", "MD5 / SHA‑1 / SHA‑256 файла и сверка с суммой с сайта", True),
+    ("tweaks_tab", "sliders", "Твики системы", "DPI, разрешение, частота экрана, анимации, Private DNS и редактор настроек Android", True),
+    ("scripts_tab", "code", "Сценарии", "Свои макросы из нескольких команд — на одном или сразу на всех устройствах", False),
+    ("payload_tab", "package", "Payload Dumper", "Извлечь boot.img, init_boot.img и другие образы из OTA‑прошивки", False),
+    ("magisk_tab", "magic", "Root через Magisk", "Мастер из 5 шагов: пропатчить boot.img в Magisk и прошить", True),
+    ("backup_tab", "save", "Резервные копии", "Разделы (EFS, persist, modem), папки с телефона и APK приложений", True),
+    ("debloat_tab", "trash", "Debloat", "Убрать рекламу и мусорные приложения Xiaomi, Samsung, Facebook, Google", False),
+    ("diag_tab", "activity", "Диагностика", "Bugreport, журнал сбоев, dumpsys, температуры и скрытые меню", True),
+    ("hash_tab", "hash", "Контрольные суммы", "MD5 / SHA‑1 / SHA‑256 файла и сверка с суммой с сайта", True),
 ]
 
 
@@ -142,7 +142,7 @@ class ToolboxPage(QWidget):
         self.back_btn.show()
         self.crumb.setText("Инструменты  ›")
         self.crumb.show()
-        self.title_lbl.setText(f"{icon} {title}")
+        self.title_lbl.setText(title)
         self.sub_lbl.setText(desc)
         fade_in(self.stack.currentWidget(), 160)
         self.app.show_page(self)
@@ -151,7 +151,7 @@ class ToolboxPage(QWidget):
         self.stack.setCurrentIndex(0)
         self.back_btn.hide()
         self.crumb.hide()
-        self.title_lbl.setText("🧰 Инструменты")
+        self.title_lbl.setText("Инструменты")
         self.sub_lbl.setText("Выберите инструмент. Подсказка: Ctrl+K — быстрый поиск чего угодно.")
         fade_in(self.stack.currentWidget(), 160)
 

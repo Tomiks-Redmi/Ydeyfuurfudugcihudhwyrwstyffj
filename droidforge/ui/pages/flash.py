@@ -5,11 +5,13 @@ from pathlib import Path
 
 from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QFormLayout, QGridLayout, QHeaderView,
+    QAbstractItemView, QCheckBox, QComboBox, QFormLayout, QGridLayout, QHBoxLayout, QHeaderView,
     QScrollArea, QTableWidget, QTableWidgetItem, QTabWidget, QVBoxLayout, QWidget,
 )
 
-from ...core.runner import Job
+from ...core.flashscript import find_scripts
+from ...core.runner import SLEEP, Job
+from ...core.workers import DecompressWorker
 from ..widgets import FilePicker, button, card, hbox, human_size, label, page_header
 
 PARTITIONS = [
@@ -119,9 +121,10 @@ class FlashPage(QWidget):
         form = QFormLayout()
         form.setHorizontalSpacing(16)
         form.setVerticalSpacing(10)
-        self.s_file = FilePicker("Перетащите .img файл сюда", "Образы (*.img *.bin *.mbn *.elf);;Все файлы (*)",
+        self.s_file = FilePicker("Перетащите .img (или .img.xz / .gz / .zip — распакуется сам)",
+                                 "Образы (*.img *.bin *.mbn *.elf *.xz *.gz *.zip);;Все файлы (*)",
                                  config=self.app.config, key="img")
-        self.s_file.changed.connect(self._on_single_file)
+        self.s_file.changed.connect(lambda p: self._auto_unpack(self.s_file, p, self._on_single_file))
         self.s_part = QComboBox()
         self.s_part.setEditable(True)
         self.s_part.addItems(PARTITIONS)
@@ -275,8 +278,103 @@ class FlashPage(QWidget):
         opts.addWidget(self.f_reboot, 1, 1)
         opts.addLayout(hbox(label("Слот:", "muted"), self.f_slot, None), 0, 2)
         lay.addLayout(opts)
-        lay.addLayout(hbox(None, button("⚡ Прошить выбранное", self.flash_folder, "accent")))
+        self.f_script_row = QWidget()
+        sr = QHBoxLayout(self.f_script_row)
+        sr.setContentsMargins(0, 0, 0, 0)
+        self.f_script = QComboBox()
+        self.f_script.setMinimumWidth(320)
+        sr.addWidget(label("Фирменный скрипт:", "muted"))
+        sr.addWidget(self.f_script, 1)
+        sr.addWidget(button("Команды", self.show_script, "ghost"))
+        sr.addWidget(button("Выполнить скрипт", self.run_script))
+        self.f_script_row.hide()
+        self.f_scripts: list = []
+        lay.addLayout(hbox(self.f_script_row, None, button("⚡ Прошить выбранное", self.flash_folder, "accent")))
         return w
+
+    # ------------------------------------------------------ vendor scripts
+    def _selected_script(self):
+        idx = self.f_script.currentIndex()
+        return self.f_scripts[idx] if 0 <= idx < len(self.f_scripts) else None
+
+    def show_script(self) -> None:
+        sc = self._selected_script()
+        if not sc:
+            return
+        self.app.console.write(f"📜 {sc.name} — {sc.description}", "info")
+        if sc.products:
+            self.app.console.write(f"   для устройства: {', '.join(sorted(set(sc.products)))}", "info")
+        for c in sc.commands:
+            self.app.console.write("   " + ("sleep " + c[1] if c[0] == "__sleep__" else "fastboot " + " ".join(
+                Path(a).name if "/" in a or "\\" in a else a for a in c)), "out")
+        self.app.set_console_collapsed(False)
+
+    def run_script(self) -> None:
+        sc = self._selected_script()
+        if not sc:
+            return
+        if sc.missing:
+            self.app.notify(f"Не найдены файлы: {', '.join(sc.missing[:3])}", "error")
+            return
+        codename = self._device_codename()
+        products = sorted(set(sc.products))
+        if products and codename and codename not in [p.lower() for p in products]:
+            if not self.app.confirm("Прошивка для другого устройства!",
+                                    f"Скрипт рассчитан на <b>{', '.join(products)}</b>, а подключено <b>{codename}</b>. "
+                                    "Это почти наверняка «окирпичит» телефон. Продолжить?"):
+                return
+        warn = ""
+        if sc.locks_bootloader:
+            warn += "<br><br><b style='color:#f05252'>Скрипт ЗАБЛОКИРУЕТ загрузчик.</b> С неоригинальной прошивкой это кирпич."
+        if sc.wipes_data:
+            warn += "<br><br><b>Все данные пользователя будут удалены.</b>"
+        flashes = sum(1 for c in sc.commands if c[:1] == ["flash"])
+        if not self.app.confirm(f"Выполнить {sc.name}?",
+                                f"{sc.description.capitalize()}: команд — {len(sc.commands)}, из них прошивок — {flashes}."
+                                f"{warn}<br><br>Не отключайте устройство до окончания."):
+            return
+        pre = self._prepare_fastboot()
+        if pre is None:
+            return
+        jobs = list(pre)
+        for c in sc.commands:
+            if c[0] == "__sleep__":
+                jobs.append(Job(SLEEP, [c[1]]))
+            else:
+                lbl = f"Прошивка {c[c.index('flash') + 1]}" if "flash" in c and c.index("flash") + 1 < len(c) else ""
+                jobs.append(self.app.fb_job(*c, label=lbl))
+        self.app.run(jobs, stop_on_error=True)
+
+    # ------------------------------------------------------ archives
+    def _auto_unpack(self, picker, path: str, then=None) -> None:
+        if not path or not DecompressWorker.needs(path) or not Path(path).is_file():
+            if then:
+                then(path)
+            return
+        worker = DecompressWorker(path, self)
+        self._unpackers = getattr(self, "_unpackers", []) + [worker]
+        self.app.console.write(f"📦 Распаковка {Path(path).name}…", "info")
+        self.app.notify(f"Распаковка {Path(path).name}…", "info")
+        last = {"pct": -1}
+
+        def prog(done: int, total: int) -> None:
+            pct = int(done * 100 / total) if total else 0
+            if pct // 10 != last["pct"] // 10:
+                last["pct"] = pct
+                self.app.console.write(f"   {pct}%", "out")
+
+        def ok(img: str) -> None:
+            picker.setPath(img)
+            self.app.console.write(f"✔ Готово: {Path(img).name}", "ok")
+            self.app.notify(f"Распаковано: {Path(img).name}", "ok")
+            if then:
+                then(img)
+
+        worker.progress.connect(prog)
+        worker.done.connect(ok)
+        worker.failed.connect(lambda e: (self.app.console.write(f"✖ Ошибка распаковки: {e}", "fail"),
+                                         self.app.notify("Не удалось распаковать архив", "error")))
+        worker.start()
 
     def scan_folder(self, folder: str) -> None:
         root = Path(folder)
@@ -319,6 +417,13 @@ class FlashPage(QWidget):
         if self.f_required:
             msg += f"   ·   🎯 для устройства: {', '.join(self.f_required)}"
         self.f_status.setText(msg)
+        self.f_scripts = find_scripts(root)
+        self.f_script.clear()
+        for sc in self.f_scripts:
+            self.f_script.addItem(f"{sc.name}  —  {sc.description}")
+        safe = next((i for i, sc in enumerate(self.f_scripts) if "except" in sc.name.lower()), 0)
+        self.f_script.setCurrentIndex(safe)
+        self.f_script_row.setVisible(bool(self.f_scripts))
 
     @staticmethod
     def _read_android_info(root: Path) -> list[str]:
@@ -516,12 +621,13 @@ class FlashPage(QWidget):
         lay.setSpacing(14)
         c, cl = card("🧬 Установка GSI (Generic System Image)",
                      "Чистый Android или кастомная система на любом устройстве с Project Treble. "
-                     "Нужен разблокированный загрузчик. Архивы .xz / .zip сначала распакуйте до .img.")
+                     "Нужен разблокированный загрузчик. Архивы .xz / .gz / .zip распаковываются автоматически.")
         form = QFormLayout()
         form.setHorizontalSpacing(16)
         form.setVerticalSpacing(10)
-        self.g_img = FilePicker("Перетащите system.img (GSI)", "Образы (*.img)", exts=(".img",),
-                                config=self.app.config, key="gsi")
+        self.g_img = FilePicker("Перетащите system.img (GSI), можно .img.xz / .zip", "Образы (*.img *.xz *.gz *.zip)",
+                                exts=(".img", ".xz", ".gz", ".zip"), config=self.app.config, key="gsi")
+        self.g_img.changed.connect(lambda p: self._auto_unpack(self.g_img, p))
         self.g_vbmeta = FilePicker("vbmeta.img от вашей стоковой прошивки (рекомендуется)", "Образы (*.img)",
                                    exts=(".img",), config=self.app.config, key="img")
         form.addRow("GSI образ", self.g_img)

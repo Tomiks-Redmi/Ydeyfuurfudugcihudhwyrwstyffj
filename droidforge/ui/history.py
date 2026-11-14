@@ -8,6 +8,7 @@ from PyQt6.QtCore import Qt
 from PyQt6.QtWidgets import QDialog, QFrame, QListWidget, QListWidgetItem, QVBoxLayout
 
 from ..core.runner import ECHO, SLEEP, Job
+from . import icons
 from .widgets import button, hbox, label
 
 DANGER_WORDS = ("flash", "erase", "-w", "set_active", "unlock", "lock", "dd ", "uninstall", "rm ", "format", "update")
@@ -48,7 +49,7 @@ class HistoryPopup(QDialog):
         lay = QVBoxLayout(frame)
         lay.setContentsMargins(12, 12, 12, 12)
         lay.setSpacing(8)
-        lay.addLayout(hbox(label("🕘 История операций", "cardTitle"), None,
+        lay.addLayout(hbox(label("История операций", "cardTitle"), None,
                            button("Очистить", self._clear, "ghost")))
         self.list = QListWidget(objectName="paletteList")
         self.list.itemActivated.connect(self._repeat)
@@ -62,8 +63,8 @@ class HistoryPopup(QDialog):
         for e in entries:
             when = time.strftime("%H:%M:%S", time.localtime(e.started))
             n = len(e.commands)
-            it = QListWidgetItem(f"{'✅' if e.ok else '❌'}  {when}   {e.title}\n"
-                                 f"        команд: {n}  ·  {e.duration:.1f} с")
+            it = QListWidgetItem(f"{e.title}\n{when}  ·  команд: {n}  ·  {e.duration:.1f} с")
+            it.setIcon(icons.icon("check" if e.ok else "x", "accent" if e.ok else "danger"))
             it.setData(Qt.ItemDataRole.UserRole, e)
             it.setToolTip("\n".join(j.display() for j in e.commands[:25]))
             self.list.addItem(it)

@@ -7,6 +7,7 @@ from typing import Callable
 from PyQt6.QtCore import QEvent, Qt
 from PyQt6.QtWidgets import QDialog, QFrame, QLineEdit, QListWidget, QListWidgetItem, QVBoxLayout
 
+from . import icons
 from .widgets import label
 
 
@@ -37,7 +38,7 @@ class CommandPalette(QDialog):
         lay.setContentsMargins(0, 0, 0, 8)
         lay.setSpacing(0)
         self.input = QLineEdit(objectName="paletteInput")
-        self.input.setPlaceholderText("🔎  Что сделать?  Страница, инструмент, команда, перезагрузка…")
+        self.input.setPlaceholderText("Что сделать? Страница, инструмент, команда, перезагрузка…")
         self.input.textChanged.connect(self._refresh)
         self.input.installEventFilter(self)
         lay.addWidget(self.input)
@@ -69,7 +70,9 @@ class CommandPalette(QDialog):
         shown = 0
         for item in self.items:
             if all(w in item.haystack for w in words):
-                it = QListWidgetItem(f"{item.icon}   {item.title}      ·  {item.group}")
+                it = QListWidgetItem(f"{item.title}     ·  {item.group}")
+                if icons.has(item.icon):
+                    it.setIcon(icons.icon(item.icon))
                 it.setToolTip(item.hint or item.group)
                 it.setData(Qt.ItemDataRole.UserRole, item)
                 self.list.addItem(it)
