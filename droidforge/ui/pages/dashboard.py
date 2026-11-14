@@ -2,10 +2,13 @@
 from __future__ import annotations
 
 import re
+import time
+from pathlib import Path
 
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QGridLayout, QHBoxLayout, QHeaderView, QLineEdit, QScrollArea,
+    QAbstractItemView, QFileDialog, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QProgressBar,
+    QScrollArea,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
@@ -77,11 +80,44 @@ class DashboardPage(QWidget):
         self.battery = label("", "h2")
         row.addWidget(self.battery)
         row.addWidget(button("⟳ Обновить", self.refresh))
+        row.addWidget(button("📄 Отчёт", self.export_report, tip="Сохранить всю информацию об устройстве в файл"))
         hl.addLayout(row)
         self.hint = label("", "hint", wrap=True)
         self.hint.hide()
         hl.addWidget(self.hint)
         lay.addWidget(hero)
+
+        # ---- live monitor
+        mon, ml = card()
+        head = QHBoxLayout()
+        head.addWidget(label("📈 Живой мониторинг", "cardTitle"))
+        head.addStretch(1)
+        self.mon_btn = button("▶ Включить", self.toggle_monitor)
+        head.addWidget(self.mon_btn)
+        ml.addLayout(head)
+        mg = QGridLayout()
+        mg.setHorizontalSpacing(14)
+        mg.setVerticalSpacing(8)
+        self.meters: dict[str, tuple[QProgressBar, QLabel]] = {}
+        for i, (key, name) in enumerate([("ram", "🧠 ОЗУ"), ("data", "💾 Память /data"),
+                                         ("cpu", "⚙ Нагрузка CPU"), ("temp", "🌡 Батарея")]):
+            bar = QProgressBar()
+            bar.setTextVisible(False)
+            val = label("—", "value")
+            val.setMinimumWidth(150)
+            r, c = divmod(i, 2)
+            mg.addWidget(label(name, "muted"), r, c * 3)
+            mg.addWidget(bar, r, c * 3 + 1)
+            mg.addWidget(val, r, c * 3 + 2)
+            self.meters[key] = (bar, val)
+        mg.setColumnStretch(1, 1)
+        mg.setColumnStretch(4, 1)
+        ml.addLayout(mg)
+        lay.addWidget(mon)
+        self.mon_timer = QTimer(self)
+        self.mon_timer.setInterval(2500)
+        self.mon_timer.timeout.connect(self._poll_monitor)
+        self._mon_busy = False
 
         # ---- info + actions
         mid = QHBoxLayout()
@@ -164,6 +200,83 @@ class DashboardPage(QWidget):
         elif dev.mode == "sideload":
             self._show_hint("Режим sideload — перейдите на вкладку «Прошивка → Sideload / ZIP».")
         self.refresh()
+
+    # ---------------------------------------------------------- monitor
+    def toggle_monitor(self) -> None:
+        if self.mon_timer.isActive():
+            self.mon_timer.stop()
+            self.mon_btn.setText("▶ Включить")
+            return
+        if not self.app.require_device(shell=True):
+            return
+        self.mon_timer.start()
+        self.mon_btn.setText("⏸ Выключить")
+        self._poll_monitor()
+
+    def _poll_monitor(self) -> None:
+        dev = self.app.device
+        if not dev or not dev.has_shell:
+            self.toggle_monitor()
+            return
+        if self._mon_busy or not self.isVisible():
+            return
+        self._mon_busy = True
+        cmd = ("cat /proc/meminfo; echo @@; df /data | tail -n 1; echo @@; cat /proc/loadavg; "
+               "echo @@; grep -c ^processor /proc/cpuinfo; echo @@; dumpsys battery | grep -E 'level|temperature'")
+        self.app.capture_adb(["shell", cmd], self._on_monitor, timeout=8000)
+
+    def _on_monitor(self, code: int, out: str) -> None:
+        self._mon_busy = False
+        parts = out.split("@@")
+        if code != 0 or len(parts) < 5:
+            return
+        mem = dict(re.findall(r"^(\w+):\s+(\d+)", parts[0], re.M))
+        total, avail = int(mem.get("MemTotal", 0)), int(mem.get("MemAvailable", 0))
+        if total:
+            used = total - avail
+            self._meter("ram", used / total, f"{used / 1048576:.1f} / {total / 1048576:.1f} ГБ")
+        df = parts[1].split()
+        if len(df) >= 4 and df[1].isdigit() and df[2].isdigit():
+            size, used = int(df[1]), int(df[2])
+            self._meter("data", used / size if size else 0, f"{used / 1048576:.1f} / {size / 1048576:.1f} ГБ")
+        try:
+            load = float(parts[2].split()[0])
+            cores = max(1, int(parts[3].strip() or 1))
+            self._meter("cpu", min(1.0, load / cores), f"{load:.2f}  ({cores} ядер)")
+        except (ValueError, IndexError):
+            pass
+        temp = re.search(r"temperature:\s*(\d+)", parts[4])
+        level = re.search(r"level:\s*(\d+)", parts[4])
+        if temp:
+            t = int(temp.group(1)) / 10
+            self._meter("temp", min(1.0, t / 50), f"{t:.1f}°C" + (f"  ·  {level.group(1)}%" if level else ""),
+                        warn=t >= 42)
+
+    def _meter(self, key: str, frac: float, text: str, warn: bool | None = None) -> None:
+        bar, val = self.meters[key]
+        bar.setMaximum(1000)
+        bar.setValue(int(frac * 1000))
+        val.setText(text)
+        hot = frac > 0.9 if warn is None else warn
+        bar.setStyleSheet("QProgressBar::chunk { background: #ff4d6d; }" if hot else "")
+
+    def export_report(self) -> None:
+        dev = self.app.device
+        if not dev or not self.props:
+            self.app.notify("Нет данных об устройстве", "warn")
+            return
+        name = f"device_{dev.serial}_{time.strftime('%Y%m%d_%H%M%S')}.txt"
+        path, _ = QFileDialog.getSaveFileName(self, "Сохранить отчёт",
+                                              str(Path(self.app.config.last_dir("reports")) / name), "Текст (*.txt)")
+        if not path:
+            return
+        self.app.config.remember_dir("reports", path)
+        lines = [f"DroidForge — отчёт об устройстве ({time.strftime('%Y-%m-%d %H:%M')})",
+                 f"Устройство: {self.title.text()}", f"Серийный номер: {dev.serial}", f"Режим: {dev.mode_name}",
+                 f"Батарея: {self.battery.text() or '—'}", "", "=" * 60]
+        lines += [f"{k} = {v}" for k, v in sorted(self.props.items())]
+        Path(path).write_text("\n".join(lines), encoding="utf-8")
+        self.app.notify("📄 Отчёт сохранён", "ok")
 
     def _show_hint(self, text: str) -> None:
         self.hint.setText(text)
@@ -252,7 +365,7 @@ class DashboardPage(QWidget):
             self.table.setRowHidden(r, bool(text) and text not in k and text not in v)
 
     def _screenshot(self) -> None:
-        self.app.nav.setCurrentRow(2)
-        page = self.app.pages[2][2]
+        page = self.app.page_adb
+        self.app.show_page(page)
         page.tabs.setCurrentIndex(3)
         page.screen_tab.take_screenshot()

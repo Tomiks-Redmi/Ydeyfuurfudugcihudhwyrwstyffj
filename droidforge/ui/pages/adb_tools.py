@@ -3,11 +3,12 @@ from __future__ import annotations
 
 import posixpath
 import re
+import shutil
 import time
 from pathlib import Path
 
-from PyQt6.QtCore import Qt
-from PyQt6.QtGui import QPixmap
+from PyQt6.QtCore import QProcess, QProcessEnvironment, Qt, QUrl
+from PyQt6.QtGui import QDesktopServices, QPixmap
 from PyQt6.QtWidgets import (
     QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QGridLayout, QHBoxLayout, QInputDialog,
     QLabel, QLineEdit, QListWidgetItem, QMenu, QSpinBox, QTabWidget, QVBoxLayout, QWidget,
@@ -72,7 +73,7 @@ class AppsTab(QWidget):
         self.list.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
         self.list.customContextMenuRequested.connect(self._menu)
         self.list.itemDoubleClicked.connect(lambda _: self.launch())
-        self.list.filesDropped.connect(lambda paths: app.pages[2][2].apk_tab.install_paths(paths))
+        self.list.filesDropped.connect(lambda paths: app.page_adb.apk_tab.install_paths(paths))
         lay.addWidget(self.list, 1)
 
         lay.addLayout(hbox(
@@ -398,7 +399,8 @@ class ApkTab(QWidget):
 
     def install_paths(self, paths: list[str]) -> None:
         self.add_paths(paths)
-        self.app.pages[2][2].tabs.setCurrentWidget(self)
+        self.app.show_page(self.app.page_adb)
+        self.app.page_adb.tabs.setCurrentWidget(self)
         self.install()
 
     def install(self) -> None:
@@ -463,8 +465,52 @@ class ScreenTab(QWidget):
         l2.addLayout(hbox(label("Длительность:", "muted"), self.rec_time, None,
                           button("⏺ Записать", self.record, "danger")))
         right.addWidget(c2)
+
+        c3, l3 = card("🖥 Зеркало экрана (scrcpy)",
+                      "Управление телефоном мышью и клавиатурой в реальном времени. Нужен установленный scrcpy.")
+        self.sc_off = QCheckBox("Погасить экран телефона")
+        self.sc_awake = QCheckBox("Не засыпать")
+        self.sc_awake.setChecked(True)
+        self.sc_audio = QCheckBox("Без звука")
+        self.sc_size = QComboBox()
+        self.sc_size.addItems(["Оригинал", "1920", "1280", "1024", "800"])
+        l3.addLayout(hbox(self.sc_off, self.sc_awake, self.sc_audio, None))
+        l3.addLayout(hbox(label("Макс. размер:", "muted"), self.sc_size, None,
+                          button("🌐 Скачать", lambda: QDesktopServices.openUrl(QUrl("https://github.com/Genymobile/scrcpy/releases"))),
+                          button("🖥 Запустить scrcpy", self.scrcpy, "accent")))
+        right.addWidget(c3)
         right.addStretch(1)
         lay.addLayout(right, 3)
+
+    def scrcpy(self) -> None:
+        exe = shutil.which("scrcpy") or self.app.config.get("scrcpy_path") or ""
+        if not exe or not Path(exe).exists():
+            path, _ = QFileDialog.getOpenFileName(self, "Где находится scrcpy?", str(Path.home()))
+            if not path:
+                self.app.notify("scrcpy не найден — скачайте его с GitHub", "warn")
+                return
+            exe = path
+            self.app.config.set("scrcpy_path", exe)
+        if not self.app.require_device(shell=True):
+            return
+        args = ["-s", self.app.device.serial, "--window-title", f"DroidForge · {self.app.device.title}"]
+        if self.sc_off.isChecked():
+            args.append("--turn-screen-off")
+        if self.sc_awake.isChecked():
+            args.append("--stay-awake")
+        if self.sc_audio.isChecked():
+            args.append("--no-audio")
+        if self.sc_size.currentIndex() > 0:
+            args += ["--max-size", self.sc_size.currentText()]
+        proc = QProcess(self)
+        env = QProcessEnvironment.systemEnvironment()
+        env.insert("ADB", self.app.tools.adb)
+        proc.setProcessEnvironment(env)
+        proc.setProgram(exe)
+        proc.setArguments(args)
+        ok, _pid = proc.startDetached()
+        self.app.console.write(f"❯ scrcpy {' '.join(args)}", "cmd")
+        self.app.notify("🖥 scrcpy запущен" if ok else "Не удалось запустить scrcpy", "ok" if ok else "error")
 
     def key(self, code: int) -> None:
         if self.app.require_device(shell=True):

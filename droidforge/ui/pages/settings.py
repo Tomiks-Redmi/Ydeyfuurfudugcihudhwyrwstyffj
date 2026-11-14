@@ -5,7 +5,8 @@ from PyQt6.QtCore import QUrl
 from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import QCheckBox, QFormLayout, QProgressBar, QScrollArea, QSpinBox, QVBoxLayout, QWidget
 
-from ...core.config import CONFIG_FILE
+from ...core.config import APP_DIR, CONFIG_FILE
+from ...core.logfile import LOG_DIR
 from ...core.tools import EXE, PlatformToolsDownloader, platform_tools_url
 from ..widgets import FilePicker, button, card, hbox, label, page_header
 
@@ -73,12 +74,17 @@ class SettingsPage(QWidget):
         l3.addLayout(hbox(label("Интервал опроса устройств:", "muted"), self.poll, None))
         l3.addWidget(self.stop_err)
         l3.addWidget(label(f"Файл настроек: <code>{CONFIG_FILE}</code>", "muted"))
+        l3.addWidget(label("Весь вывод консоли сохраняется в журнал сессии — пригодится, если прошивка пошла не так.",
+                           "muted", wrap=True))
+        l3.addLayout(hbox(button("📂 Открыть папку журналов", lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(LOG_DIR)))),
+                          button("📂 Папка программы", lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(APP_DIR)))),
+                          None))
         lay.addWidget(c3)
 
         # ---- shortcuts
         c4, l4 = card("⌨ Горячие клавиши")
         l4.addWidget(label(
-            "<b>Ctrl+1…6</b> — разделы &nbsp;·&nbsp; <b>F5</b> — обновить устройства &nbsp;·&nbsp; "
+            "<b>Ctrl+1…7</b> — разделы &nbsp;·&nbsp; <b>F5</b> — обновить устройства &nbsp;·&nbsp; "
             "<b>Ctrl+L</b> — консоль &nbsp;·&nbsp; <b>Esc</b> — остановить выполнение &nbsp;·&nbsp; "
             "<b>↑ / ↓</b> — история команд", "muted", wrap=True))
         lay.addWidget(c4)

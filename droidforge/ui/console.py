@@ -56,6 +56,7 @@ class HistoryLineEdit(QLineEdit):
 
 class Console(QFrame):
     commandEntered = pyqtSignal(str)
+    lineWritten = pyqtSignal(str, str)
     stopRequested = pyqtSignal()
 
     def __init__(self, history: list[str], completions: list[str], parent=None):
@@ -130,6 +131,7 @@ class Console(QFrame):
         return self._fmt_cache[key]
 
     def write(self, text: str, kind: str = "out") -> None:
+        self.lineWritten.emit(text, kind)
         if kind in ("out", "err"):
             if RE_FAIL.search(text):
                 color = theme.DANGER

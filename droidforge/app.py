@@ -14,6 +14,7 @@ from . import __app_name__, __version__
 from .core.commands import NO_SERIAL, all_completions, split_command
 from .core.config import Config
 from .core.devices import Device, DeviceMonitor
+from .core.logfile import SessionLog
 from .core.runner import CommandRunner, Job, capture
 from .core.tools import Tools
 from .ui import theme
@@ -44,6 +45,7 @@ class MainWindow(QMainWindow):
         self.device: Device | None = None
         self.devices: list[Device] = []
         self._after: list = []
+        self.session_log = SessionLog()
 
         self.setWindowTitle(f"{__app_name__} — ADB & Fastboot Studio")
         self.setWindowIcon(make_icon())
@@ -112,14 +114,23 @@ class MainWindow(QMainWindow):
         from .ui.pages.logcat import LogcatPage
         from .ui.pages.quick import QuickPage
         from .ui.pages.settings import SettingsPage
+        from .ui.pages.toolbox import ToolboxPage
 
+        self.page_dashboard = DashboardPage(self)
+        self.page_flash = FlashPage(self)
+        self.page_adb = AdbToolsPage(self)
+        self.page_toolbox = ToolboxPage(self)
+        self.page_quick = QuickPage(self)
+        self.page_logcat = LogcatPage(self)
+        self.page_settings = SettingsPage(self)
         self.pages = [
-            ("🏠", "Обзор", DashboardPage(self)),
-            ("⚡", "Прошивка", FlashPage(self)),
-            ("📱", "ADB инструменты", AdbToolsPage(self)),
-            ("🚀", "Быстрые команды", QuickPage(self)),
-            ("📜", "Logcat", LogcatPage(self)),
-            ("⚙️", "Настройки", SettingsPage(self)),
+            ("🏠", "Обзор", self.page_dashboard),
+            ("⚡", "Прошивка", self.page_flash),
+            ("📱", "ADB инструменты", self.page_adb),
+            ("🧰", "Инструменты", self.page_toolbox),
+            ("🚀", "Быстрые команды", self.page_quick),
+            ("📜", "Logcat", self.page_logcat),
+            ("⚙️", "Настройки", self.page_settings),
         ]
         for i, (icon, name, page) in enumerate(self.pages):
             item = QListWidgetItem(f"  {icon}   {name}")
@@ -130,6 +141,7 @@ class MainWindow(QMainWindow):
         self.nav.setCurrentRow(0)
 
         self.toast = Toast(self)
+        self.setAcceptDrops(True)
 
     def _build_header(self) -> QFrame:
         header = QFrame(objectName="header")
@@ -162,6 +174,7 @@ class MainWindow(QMainWindow):
 
     def _wire(self) -> None:
         self.runner.output.connect(self.console.write)
+        self.console.lineWritten.connect(self.session_log.write)
         self.runner.busyChanged.connect(self.console.set_busy)
         self.runner.progress.connect(self.console.set_progress)
         self.runner.queueFinished.connect(self._on_queue_finished)
@@ -321,6 +334,54 @@ class MainWindow(QMainWindow):
     def notify(self, text: str, kind: str = "info") -> None:
         self.toast.show_message(text, kind)
 
+    def show_page(self, page: QWidget) -> None:
+        for i, (_icon, _name, p) in enumerate(self.pages):
+            if p is page:
+                self.nav.setCurrentRow(i)
+
+    # ---- drag & drop anywhere on the window
+    def dragEnterEvent(self, e) -> None:
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+
+    def dropEvent(self, e) -> None:
+        import zipfile
+        from pathlib import Path
+        paths = [u.toLocalFile() for u in e.mimeData().urls() if u.isLocalFile()]
+        if not paths:
+            return
+        first = Path(paths[0])
+        ext = first.suffix.lower()
+        apks = [p for p in paths if p.lower().endswith(".apk")]
+        if apks:
+            self.page_adb.apk_tab.install_paths(apks)
+        elif first.is_dir():
+            self.show_page(self.page_flash)
+            self.page_flash.tabs.setCurrentIndex(1)
+            self.page_flash.f_dir.setPath(str(first))
+            self.page_flash.scan_folder(str(first))
+        elif ext in (".img", ".bin", ".mbn", ".elf") and first.name != "payload.bin":
+            self.show_page(self.page_flash)
+            self.page_flash.tabs.setCurrentIndex(0)
+            self.page_flash.s_file.setPath(str(first))
+            self.page_flash._on_single_file(str(first))
+        elif first.name == "payload.bin" or (ext == ".zip" and zipfile.is_zipfile(first)
+                                            and "payload.bin" in zipfile.ZipFile(first).namelist()):
+            tab = self.page_toolbox.payload_tab
+            tab.src.setPath(str(first))
+            tab.load(str(first))
+            self.page_toolbox.show_tab(tab)
+        elif ext == ".zip":
+            self.show_page(self.page_flash)
+            self.page_flash.tabs.setCurrentIndex(3)
+            self.page_flash.z_file.setPath(str(first))
+        else:
+            self.show_page(self.page_toolbox)
+            self.page_toolbox.hash_tab.file.setPath(str(first))
+            self.page_toolbox.show_tab(self.page_toolbox.hash_tab)
+            self.page_toolbox.hash_tab.compute()
+        e.acceptProposedAction()
+
     def clipboard_set(self, text: str) -> None:
         QApplication.clipboard().setText(text)
         self.notify("📋 Скопировано", "ok")
@@ -371,6 +432,7 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, e) -> None:
         self.config.set("history", self.console.input.history[-200:])
+        self.session_log.close()
         for _icon, _name, page in self.pages:
             if hasattr(page, "shutdown"):
                 page.shutdown()
