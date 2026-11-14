@@ -8,7 +8,7 @@ from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QAction, QFont, QIcon, QKeySequence, QPainter, QPixmap, QShortcut, QColor, QLinearGradient
 from PyQt6.QtWidgets import (
     QApplication, QComboBox, QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
-    QMainWindow, QMenu, QMessageBox, QSplitter, QStackedWidget, QSystemTrayIcon, QToolButton, QVBoxLayout, QWidget,
+    QMainWindow, QMenu, QMessageBox, QPushButton, QSplitter, QStackedWidget, QSystemTrayIcon, QToolButton, QVBoxLayout, QWidget,
 )
 
 from . import __app_name__, __version__
@@ -20,7 +20,8 @@ from .core.runner import ECHO, SLEEP, CommandRunner, Job, capture
 from .core.tools import Tools
 from .ui import theme
 from .ui.console import Console
-from .ui.widgets import Toast, button, label
+from .ui.palette import CommandPalette, PaletteItem
+from .ui.widgets import Toast, button, fade_in, label
 
 REBOOT_TARGETS = [
     ("system", "📱  В систему"),
@@ -47,7 +48,8 @@ class MainWindow(QMainWindow):
         self.devices: list[Device] = []
         self._after: list = []
         self.session_log = SessionLog()
-        self.apply_accent(self.config.get("accent", "Фиолетовый"))
+        self._battery = ""
+        self.apply_theme()
         self._queue_t0 = 0.0
 
         self.setWindowTitle(f"{__app_name__} — ADB & Fastboot Studio")
@@ -71,26 +73,7 @@ class MainWindow(QMainWindow):
         outer = QHBoxLayout(root)
         outer.setContentsMargins(0, 0, 0, 0)
         outer.setSpacing(0)
-
-        # ---- sidebar
-        sidebar = QFrame(objectName="sidebar")
-        sidebar.setFixedWidth(230)
-        sl = QVBoxLayout(sidebar)
-        sl.setContentsMargins(14, 18, 14, 14)
-        sl.setSpacing(6)
-        logo = QLabel(f'<span style="color:{theme.ACCENT}">⚡</span> Droid'
-                      f'<span style="color:{theme.ACCENT_2}">Forge</span>')
-        logo.setObjectName("logo")
-        sl.addWidget(logo)
-        sl.addWidget(label(f"ADB & Fastboot Studio · v{__version__}", "version"))
-        sl.addSpacing(14)
-        self.nav = QListWidget(objectName="nav")
-        self.nav.setIconSize(QSize(20, 20))
-        sl.addWidget(self.nav, 1)
-        self.tools_label = label("", "muted", wrap=True)
-        self.tools_label.setStyleSheet("font-size: 8pt;")
-        sl.addWidget(self.tools_label)
-        outer.addWidget(sidebar)
+        outer.addWidget(self._build_sidebar())
 
         # ---- content
         content = QWidget(objectName="content")
@@ -101,14 +84,15 @@ class MainWindow(QMainWindow):
 
         self.stack = QStackedWidget()
         self.console = Console(self.config.get("history"), all_completions())
-        splitter = QSplitter(Qt.Orientation.Vertical)
-        splitter.addWidget(self.stack)
-        splitter.addWidget(self.console)
-        splitter.setStretchFactor(0, 3)
-        splitter.setStretchFactor(1, 1)
-        splitter.setSizes([660, 210])
-        splitter.setChildrenCollapsible(False)
-        cl.addWidget(splitter, 1)
+        self.splitter = QSplitter(Qt.Orientation.Vertical)
+        self.splitter.addWidget(self.stack)
+        self.splitter.addWidget(self.console)
+        self.splitter.setStretchFactor(0, 1)
+        self.splitter.setStretchFactor(1, 0)
+        self.splitter.setSizes([680, 200])
+        self.splitter.setChildrenCollapsible(False)
+        self._console_h = 200
+        cl.addWidget(self.splitter, 1)
         outer.addWidget(content, 1)
 
         from .ui.pages.adb_tools import AdbToolsPage
@@ -126,24 +110,30 @@ class MainWindow(QMainWindow):
         self.page_quick = QuickPage(self)
         self.page_logcat = LogcatPage(self)
         self.page_settings = SettingsPage(self)
-        self.pages = [
-            ("🏠", "Обзор", self.page_dashboard),
-            ("⚡", "Прошивка", self.page_flash),
-            ("📱", "ADB инструменты", self.page_adb),
-            ("🧰", "Инструменты", self.page_toolbox),
-            ("🚀", "Быстрые команды", self.page_quick),
-            ("📜", "Logcat", self.page_logcat),
-            ("⚙️", "Настройки", self.page_settings),
+        sections = [
+            ("ГЛАВНОЕ", [("🏠", "Обзор", self.page_dashboard), ("⚡", "Прошивка", self.page_flash)]),
+            ("УСТРОЙСТВО", [("📱", "ADB инструменты", self.page_adb), ("🧰", "Инструменты", self.page_toolbox),
+                            ("📜", "Logcat", self.page_logcat)]),
+            ("ЕЩЁ", [("🚀", "Быстрые команды", self.page_quick), ("⚙️", "Настройки", self.page_settings)]),
         ]
-        for i, (icon, name, page) in enumerate(self.pages):
-            item = QListWidgetItem(f"  {icon}   {name}")
-            item.setToolTip(f"{name}  (Ctrl+{i + 1})")
-            self.nav.addItem(item)
-            self.stack.addWidget(page)
-        self.nav.currentRowChanged.connect(self.stack.setCurrentIndex)
-        self.nav.setCurrentRow(0)
+        self.pages = []
+        for section, items in sections:
+            head = QListWidgetItem(section)
+            head.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.nav.addItem(head)
+            for icon, name, page in items:
+                idx = self.stack.addWidget(page)
+                self.pages.append((icon, name, page))
+                item = QListWidgetItem(f"  {icon}   {name}")
+                item.setData(Qt.ItemDataRole.UserRole, idx)
+                item.setData(Qt.ItemDataRole.UserRole + 1, (icon, name))
+                item.setToolTip(f"{name}  (Ctrl+{len(self.pages)})")
+                self.nav.addItem(item)
+        self.nav.currentItemChanged.connect(self._on_nav)
+        self.nav.setCurrentRow(1)
 
         self.toast = Toast(self)
+        self.palette = CommandPalette(self, self._palette_items)
         self.setAcceptDrops(True)
         self.tray = None
         if QSystemTrayIcon.isSystemTrayAvailable():
@@ -151,22 +141,68 @@ class MainWindow(QMainWindow):
             self.tray.setToolTip(__app_name__)
             self.tray.activated.connect(lambda _r: (self.showNormal(), self.activateWindow()))
             self.tray.show()
+        self.console.toggleRequested.connect(lambda: self.set_console_collapsed(not self.console.collapsed))
+        if self.config.get("console_collapsed", False):
+            self.set_console_collapsed(True)
+        if self.config.get("sidebar_collapsed", False):
+            self.set_sidebar_collapsed(True)
+        self._refresh_theme_widgets()
+
+    def _build_sidebar(self) -> QFrame:
+        self.sidebar = QFrame(objectName="sidebar")
+        self.sidebar.setFixedWidth(236)
+        sl = QVBoxLayout(self.sidebar)
+        sl.setContentsMargins(12, 16, 12, 12)
+        sl.setSpacing(6)
+        self.logo = QLabel(objectName="logo")
+        sl.addWidget(self.logo)
+        self.version_lbl = label(f"ADB & Fastboot Studio · v{__version__}", "version")
+        sl.addWidget(self.version_lbl)
+        sl.addSpacing(8)
+        self.nav = QListWidget(objectName="nav")
+        self.nav.setIconSize(QSize(20, 20))
+        self.nav.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        sl.addWidget(self.nav, 1)
+
+        self.devcard = QFrame(objectName="devcard")
+        dl = QVBoxLayout(self.devcard)
+        dl.setContentsMargins(12, 10, 12, 10)
+        dl.setSpacing(2)
+        self.dev_name = label("Нет устройства", "devName")
+        self.dev_meta = label("Подключите телефон по USB", "devMeta", wrap=True)
+        self.tools_label = label("", "devMeta")
+        dl.addWidget(self.dev_name)
+        dl.addWidget(self.dev_meta)
+        dl.addWidget(self.tools_label)
+        sl.addWidget(self.devcard)
+        self.collapse_btn = button("«  Свернуть", lambda: self.set_sidebar_collapsed(not self._sidebar_collapsed),
+                                   "ghost", "Свернуть / развернуть меню (Ctrl+B)")
+        sl.addWidget(self.collapse_btn)
+        self._sidebar_collapsed = False
+        return self.sidebar
 
     def _build_header(self) -> QFrame:
         header = QFrame(objectName="header")
         header.setFixedHeight(62)
         hl = QHBoxLayout(header)
-        hl.setContentsMargins(20, 10, 20, 10)
-        hl.setSpacing(10)
-        hl.addWidget(label("Устройство:", "muted"))
+        hl.setContentsMargins(18, 10, 18, 10)
+        hl.setSpacing(8)
         self.device_combo = QComboBox()
-        self.device_combo.setMinimumWidth(360)
+        self.device_combo.setMinimumWidth(300)
+        self.device_combo.setToolTip("Выбранное устройство")
         self.device_combo.currentIndexChanged.connect(self._on_combo)
         hl.addWidget(self.device_combo)
         self.badge = QLabel("—", objectName="badge")
         hl.addWidget(self.badge)
-        hl.addWidget(button("⟳", lambda: self.monitor.poll(force=True), tip="Обновить список (F5)"))
+        hl.addWidget(button("⟳", lambda: self.monitor.poll(force=True), "icon", "Обновить список устройств (F5)"))
         hl.addStretch(1)
+        search = QPushButton("🔎   Поиск команд и действий…            Ctrl+K", objectName="search")
+        search.setCursor(Qt.CursorShape.PointingHandCursor)
+        search.clicked.connect(self.palette_open)
+        hl.addWidget(search)
+        hl.addStretch(1)
+        self.theme_btn = button("🌙", self.toggle_theme, "icon", "Светлая / тёмная тема (Ctrl+T)")
+        hl.addWidget(self.theme_btn)
 
         reboot = QToolButton()
         reboot.setText("⏻  Перезагрузка  ▾")
@@ -181,6 +217,63 @@ class MainWindow(QMainWindow):
         hl.addWidget(reboot)
         return header
 
+    # ------------------------------------------------------- layout state
+    def _on_nav(self, item, _prev=None) -> None:
+        if item is None or item.data(Qt.ItemDataRole.UserRole) is None:
+            return
+        idx = item.data(Qt.ItemDataRole.UserRole)
+        if idx != self.stack.currentIndex():
+            self.stack.setCurrentIndex(idx)
+            fade_in(self.stack.currentWidget(), 180)
+
+    def show_page(self, page: QWidget) -> None:
+        idx = self.stack.indexOf(page)
+        for row in range(self.nav.count()):
+            if self.nav.item(row).data(Qt.ItemDataRole.UserRole) == idx:
+                self.nav.setCurrentRow(row)
+                return
+
+    def set_sidebar_collapsed(self, collapsed: bool) -> None:
+        self._sidebar_collapsed = collapsed
+        self.sidebar.setFixedWidth(78 if collapsed else 236)
+        for row in range(self.nav.count()):
+            item = self.nav.item(row)
+            meta = item.data(Qt.ItemDataRole.UserRole + 1)
+            if meta is None:
+                item.setHidden(collapsed)
+            else:
+                item.setText(f" {meta[0]}" if collapsed else f"  {meta[0]}   {meta[1]}")
+        self.version_lbl.setVisible(not collapsed)
+        self.devcard.setVisible(not collapsed)
+        self.collapse_btn.setText("»" if collapsed else "«  Свернуть")
+        self._refresh_theme_widgets()
+        self.config.set("sidebar_collapsed", collapsed)
+
+    def set_console_collapsed(self, collapsed: bool) -> None:
+        if collapsed == self.console.collapsed:
+            return
+        if collapsed:
+            h = self.splitter.sizes()[1]
+            if h > 90:
+                self._console_h = h
+            self.console.set_collapsed(True)
+            self.console.setMaximumHeight(58)
+            total = sum(self.splitter.sizes())
+            self.splitter.setSizes([total - 58, 58])
+        else:
+            self.console.set_collapsed(False)
+            self.console.setMaximumHeight(16777215)
+            total = sum(self.splitter.sizes())
+            self.splitter.setSizes([max(200, total - self._console_h), self._console_h])
+        self.config.set("console_collapsed", collapsed)
+
+    def focus_console(self) -> None:
+        self.set_console_collapsed(False)
+        self.console.focus_input()
+
+    def palette_open(self) -> None:
+        self.palette.open()
+
     def _wire(self) -> None:
         self.runner.output.connect(self.console.write)
         self.console.lineWritten.connect(self.session_log.write)
@@ -190,18 +283,27 @@ class MainWindow(QMainWindow):
         self.runner.queueFinished.connect(self._on_queue_finished)
         self.console.commandEntered.connect(self.run_text)
         self.console.stopRequested.connect(self.runner.stop)
+        self.runner.output.connect(lambda _t, kind: kind == "fail" and self.console.collapsed
+                                   and self.config.get("console_auto_expand", True)
+                                   and self.set_console_collapsed(False))
 
     def _shortcuts(self) -> None:
-        for i in range(len(self.pages)):
-            QShortcut(QKeySequence(f"Ctrl+{i + 1}"), self, activated=lambda i=i: self.nav.setCurrentRow(i))
+        for i, (_icon, _name, page) in enumerate(self.pages):
+            QShortcut(QKeySequence(f"Ctrl+{i + 1}"), self, activated=lambda p=page: self.show_page(p))
         QShortcut(QKeySequence("F5"), self, activated=lambda: self.monitor.poll(force=True))
-        QShortcut(QKeySequence("Ctrl+L"), self, activated=self.console.focus_input)
+        QShortcut(QKeySequence("Ctrl+L"), self, activated=self.focus_console)
+        QShortcut(QKeySequence("Ctrl+J"), self, activated=lambda: self.set_console_collapsed(not self.console.collapsed))
+        QShortcut(QKeySequence("Ctrl+K"), self, activated=self.palette_open)
+        QShortcut(QKeySequence("Ctrl+P"), self, activated=self.palette_open)
+        QShortcut(QKeySequence("Ctrl+B"), self, activated=lambda: self.set_sidebar_collapsed(not self._sidebar_collapsed))
+        QShortcut(QKeySequence("Ctrl+T"), self, activated=self.toggle_theme)
         QShortcut(QKeySequence("Esc"), self, activated=self.runner.stop)
 
     def _report_tools(self) -> None:
         t = self.tools
         ok = lambda f: "✅" if f else "❌"  # noqa: E731
         self.tools_label.setText(f"{ok(t.adb_found)} adb   {ok(t.fastboot_found)} fastboot")
+        self.page_dashboard.set_tools_ok(t.adb_found and t.fastboot_found)
         if not (t.adb_found and t.fastboot_found):
             self.console.write("⚠ adb/fastboot не найдены. Откройте «Настройки» → «Скачать platform-tools».", "warn")
         else:
@@ -237,13 +339,7 @@ class MainWindow(QMainWindow):
         changed = dev != self.device
         old = self.device
         self.device = dev
-        if dev is None:
-            self.badge.setText("НЕТ УСТРОЙСТВА")
-            self.badge.setStyleSheet(f"background: {theme.SURFACE_2}; color: {theme.MUTED};")
-        else:
-            self.badge.setText(dev.mode_name.upper())
-            self.badge.setStyleSheet(f"background: {theme.rgba(dev.color, 0.14)}; color: {dev.color};"
-                                     f" border: 1px solid {theme.rgba(dev.color, 0.45)};")
+        self._refresh_badge()
         if changed:
             if dev and (old is None or old.serial != dev.serial or old.mode != dev.mode):
                 self.toast.show_message(f"🔗 {dev.title}\nРежим: {dev.mode_name}", "ok")
@@ -350,9 +446,109 @@ class MainWindow(QMainWindow):
         self.config.set("history", self.console.input.history[-200:])
         self.run(jobs, stop_on_error=False if self.console.broadcast.isChecked() else None)
 
+    # ========================================================= theming
+    def _resolve_mode(self) -> str:
+        mode = self.config.get("theme_mode", "dark")
+        if mode == "system":
+            try:
+                scheme = QApplication.styleHints().colorScheme()
+                return "light" if scheme == Qt.ColorScheme.Light else "dark"
+            except AttributeError:
+                return "dark"
+        return mode if mode in ("dark", "light") else "dark"
+
+    def apply_theme(self) -> None:
+        theme.set_palette(self._resolve_mode(), self.config.get("accent", "Фиолетовый"))
+        QApplication.instance().setStyleSheet(theme.build_qss())
+        if hasattr(self, "badge"):
+            self._refresh_theme_widgets()
+
     def apply_accent(self, name: str) -> None:
-        colors = theme.ACCENTS.get(name) or theme.ACCENTS["Фиолетовый"]
-        QApplication.instance().setStyleSheet(theme.build_qss(*colors))
+        self.config.set("accent", name)
+        self.apply_theme()
+
+    def toggle_theme(self) -> None:
+        self.config.set("theme_mode", "light" if theme.MODE == "dark" else "dark")
+        self.apply_theme()
+        self.notify("☀ Светлая тема" if theme.MODE == "light" else "🌙 Тёмная тема", "info")
+        if hasattr(self.page_settings, "sync_theme"):
+            self.page_settings.sync_theme()
+
+    def _refresh_theme_widgets(self) -> None:
+        if self._sidebar_collapsed:
+            self.logo.setText(f'<span style="color:{theme.ACCENT}">⚡</span>')
+        else:
+            self.logo.setText(f'<span style="color:{theme.ACCENT}">⚡</span> Droid'
+                              f'<span style="color:{theme.ACCENT_2}">Forge</span>')
+        self.theme_btn.setText("☀" if theme.MODE == "dark" else "🌙")
+        self._refresh_badge()
+
+    def _refresh_badge(self) -> None:
+        dev = self.device
+        if dev is None:
+            self.badge.setText("НЕТ УСТРОЙСТВА")
+            self.badge.setStyleSheet(f"background: {theme.SURFACE_2}; color: {theme.MUTED};")
+            self.dev_name.setText("🔌  Нет устройства")
+            self.dev_meta.setText("Подключите телефон по USB")
+        else:
+            self.badge.setText(dev.mode_name.upper())
+            self.badge.setStyleSheet(f"background: {theme.rgba(dev.color, 0.14)}; color: {dev.color};"
+                                     f" border: 1px solid {theme.rgba(dev.color, 0.45)};")
+            name = dev.model.replace("_", " ") or dev.product or "Устройство"
+            self.dev_name.setText(f'<span style="color:{dev.color}">●</span>  {name}')
+            meta = f"{dev.mode_name} · {'Wi‑Fi' if dev.transport == 'wifi' else 'USB'}"
+            if self._battery and dev.has_shell:
+                meta += f" · {self._battery}"
+            self.dev_meta.setText(meta)
+
+    def set_battery(self, text: str) -> None:
+        self._battery = text
+        self._refresh_badge()
+
+    # ===================================================== palette items
+    def _palette_items(self) -> list[PaletteItem]:
+        from .core.commands import PRESETS
+        items: list[PaletteItem] = []
+        for icon, name, page in self.pages:
+            items.append(PaletteItem(icon, name, "Раздел", lambda p=page: self.show_page(p)))
+        for widget, icon, title, desc in self.page_toolbox.tools():
+            items.append(PaletteItem(icon, title, "Инструмент", lambda w=widget: self.page_toolbox.show_tab(w), desc))
+        for page, group in ((self.page_flash, "Прошивка"), (self.page_adb, "ADB инструменты")):
+            for i in range(page.tabs.count()):
+                items.append(PaletteItem("›", page.tabs.tabText(i), group,
+                                         lambda p=page, i=i: (self.show_page(p), p.tabs.setCurrentIndex(i))))
+        aliases = {"system": "систему ребут reboot", "recovery": "рекавери рекaвери recovery", "bootloader": "загрузчик фастбут fastboot",
+                   "fastbootd": "фастбутд fastbootd", "sideload": "сайдлоад", "edl": "едл qualcomm", "poweroff": "выключение off"}
+        for key, text in REBOOT_TARGETS:
+            icon, _, title = text.partition("  ")
+            items.append(PaletteItem(icon, f"Перезагрузка: {title.strip()}", "Питание", lambda k=key: self.reboot(k),
+                                     aliases.get(key, "")))
+        d = self.page_dashboard
+        items += [
+            PaletteItem("📸", "Скриншот", "Действие", d._screenshot),
+            PaletteItem("📈", "Живой мониторинг вкл/выкл", "Действие", lambda: (self.show_page(d), d.toggle_monitor())),
+            PaletteItem("📄", "Отчёт об устройстве", "Действие", d.export_report),
+            PaletteItem("⟳", "Обновить список устройств", "Действие", lambda: self.monitor.poll(force=True)),
+            PaletteItem("🌗", "Сменить тему (светлая / тёмная)", "Оформление", self.toggle_theme),
+            PaletteItem("🖥", "Свернуть / развернуть консоль", "Оформление",
+                        lambda: self.set_console_collapsed(not self.console.collapsed)),
+            PaletteItem("🧹", "Очистить консоль", "Консоль", self.console.clear),
+            PaletteItem("⬇", "Скачать platform-tools", "Настройки",
+                        lambda: (self.show_page(self.page_settings), self.page_settings.download())),
+        ]
+        for name in theme.ACCENTS:
+            items.append(PaletteItem("🎨", f"Цвет: {name}", "Оформление", lambda n=name: self.apply_accent(n)))
+        for sc in self.config.get("scripts", []):
+            items.append(PaletteItem("📜", sc["name"], "Сценарий",
+                                     lambda b=sc["body"]: self.run(self.parse_script(b)), "запустить сценарий"))
+        for c in self.config.get("custom_commands", []):
+            items.append(PaletteItem("⭐", c["title"], "Моя команда", lambda cmd=c["command"]: self.run_text(cmd), c["command"]))
+        for cat, cmds in PRESETS.items():
+            for title, cmd, desc, danger in cmds:
+                items.append(PaletteItem("⚠" if danger else "▶", title, cat.split(" ", 1)[-1],
+                                         lambda t=title, c=cmd, dg=danger: self.page_quick.execute(t, c, dg),
+                                         f"{cmd} {desc}"))
+        return items
 
     # ======================================================= dialogs
     def require_device(self, *, adb: bool = False, fastboot: bool = False, shell: bool = False) -> bool:
@@ -386,11 +582,6 @@ class MainWindow(QMainWindow):
 
     def notify(self, text: str, kind: str = "info") -> None:
         self.toast.show_message(text, kind)
-
-    def show_page(self, page: QWidget) -> None:
-        for i, (_icon, _name, p) in enumerate(self.pages):
-            if p is page:
-                self.nav.setCurrentRow(i)
 
     # ---- drag & drop anywhere on the window
     def dragEnterEvent(self, e) -> None:

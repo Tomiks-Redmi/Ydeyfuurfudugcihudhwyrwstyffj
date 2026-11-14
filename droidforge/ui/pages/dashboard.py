@@ -7,7 +7,7 @@ from pathlib import Path
 
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QFileDialog, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QProgressBar,
+    QAbstractItemView, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QProgressBar,
     QScrollArea,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
@@ -86,6 +86,23 @@ class DashboardPage(QWidget):
         self.hint.hide()
         hl.addWidget(self.hint)
         lay.addWidget(hero)
+
+        # ---- "tools missing" banner
+        self.banner = QFrame(objectName="banner")
+        bl = QHBoxLayout(self.banner)
+        bl.setContentsMargins(18, 14, 18, 14)
+        bl.setSpacing(14)
+        bl.addWidget(label("🧰", "h2"))
+        btxt = QVBoxLayout()
+        btxt.setSpacing(2)
+        btxt.addWidget(label("adb / fastboot не найдены", "cardTitle"))
+        btxt.addWidget(label("Скачайте официальные platform-tools от Google — это займёт несколько секунд.", "muted", wrap=True))
+        bl.addLayout(btxt, 1)
+        bl.addWidget(button("⬇ Скачать platform-tools", lambda: (app.show_page(app.page_settings),
+                                                               app.page_settings.download()), "accent"))
+        bl.addWidget(button("Указать путь…", lambda: app.show_page(app.page_settings)))
+        self.banner.hide()
+        lay.addWidget(self.banner)
 
         # ---- live monitor
         mon, ml = card()
@@ -278,6 +295,9 @@ class DashboardPage(QWidget):
         Path(path).write_text("\n".join(lines), encoding="utf-8")
         self.app.notify("📄 Отчёт сохранён", "ok")
 
+    def set_tools_ok(self, ok: bool) -> None:
+        self.banner.setVisible(not ok)
+
     def _show_hint(self, text: str) -> None:
         self.hint.setText(text)
         self.hint.show()
@@ -328,6 +348,7 @@ class DashboardPage(QWidget):
             if temp:
                 txt += f"  ·  {int(temp.group(1)) / 10:.1f}°C"
             self.battery.setText(txt)
+            self.app.set_battery(txt.split("  ·  ")[0])
 
     def _set_props(self, props: dict[str, str], fields) -> None:
         self.props = props

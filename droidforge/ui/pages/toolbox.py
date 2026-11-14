@@ -5,18 +5,18 @@ import time
 from pathlib import Path
 
 from PyQt6.QtCore import Qt, QUrl
-from PyQt6.QtGui import QColor, QDesktopServices
+from PyQt6.QtGui import QColor, QDesktopServices, QKeySequence, QShortcut
 from PyQt6.QtWidgets import (
-    QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QGridLayout, QHeaderView,
-    QLineEdit, QProgressBar, QScrollArea, QTableWidget, QTableWidgetItem,
-    QTabWidget, QVBoxLayout, QWidget,
+    QAbstractItemView, QCheckBox, QComboBox, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QHeaderView,
+    QLineEdit, QProgressBar, QScrollArea, QStackedWidget, QTableWidget, QTableWidgetItem,
+    QVBoxLayout, QWidget,
 )
 
 from ...core.payload import Payload, PayloadError
 from ...core.workers import HashWorker, PayloadWorker
 from .. import theme
 from .toolbox_extra import DiagnosticsTab, ScriptsTab, TweaksTab
-from ..widgets import FilePicker, button, card, hbox, human_size, label, page_header
+from ..widgets import FilePicker, ToolCard, button, card, fade_in, hbox, human_size, label
 
 
 def _scroll(w: QWidget) -> QScrollArea:
@@ -65,6 +65,18 @@ def _checked_rows(table: QTableWidget) -> list[int]:
             if table.item(r, 0).checkState() == Qt.CheckState.Checked and not table.isRowHidden(r)]
 
 
+TOOLS = [  # attribute, icon, title, description, needs scroll
+    ("tweaks_tab", "🎛", "Твики системы", "DPI, разрешение, частота экрана, анимации, Private DNS и редактор настроек Android", True),
+    ("scripts_tab", "📜", "Сценарии", "Свои макросы из нескольких команд — на одном или сразу на всех устройствах", False),
+    ("payload_tab", "📦", "Payload Dumper", "Извлечь boot.img, init_boot.img и другие образы из OTA‑прошивки", False),
+    ("magisk_tab", "🪄", "Root через Magisk", "Мастер из 5 шагов: пропатчить boot.img в Magisk и прошить", True),
+    ("backup_tab", "💾", "Резервные копии", "Разделы (EFS, persist, modem), папки с телефона и APK приложений", True),
+    ("debloat_tab", "🧹", "Debloat", "Убрать рекламу и мусорные приложения Xiaomi, Samsung, Facebook, Google", False),
+    ("diag_tab", "🩺", "Диагностика", "Bugreport, журнал сбоев, dumpsys, температуры и скрытые меню", True),
+    ("hash_tab", "🔐", "Контрольные суммы", "MD5 / SHA‑1 / SHA‑256 файла и сверка с суммой с сайта", True),
+]
+
+
 class ToolboxPage(QWidget):
     def __init__(self, app):
         super().__init__()
@@ -72,9 +84,24 @@ class ToolboxPage(QWidget):
         lay = QVBoxLayout(self)
         lay.setContentsMargins(24, 20, 24, 12)
         lay.setSpacing(14)
-        lay.addLayout(page_header("🧰 Инструменты", "Твики системы, сценарии, распаковка OTA, root через Magisk, бэкапы, "
-                                                    "debloat, диагностика и контрольные суммы."))
-        self.tabs = QTabWidget()
+
+        head = QHBoxLayout()
+        head.setSpacing(12)
+        self.back_btn = button("←", self.go_home, "icon", "Все инструменты (Alt+←)")
+        self.back_btn.hide()
+        head.addWidget(self.back_btn, 0, Qt.AlignmentFlag.AlignTop)
+        titles = QVBoxLayout()
+        titles.setSpacing(2)
+        self.crumb = label("", "crumb")
+        self.crumb.hide()
+        self.title_lbl = label("🧰 Инструменты", "h1")
+        self.sub_lbl = label("Выберите инструмент. Подсказка: Ctrl+K — быстрый поиск чего угодно.", "muted", wrap=True)
+        titles.addWidget(self.crumb)
+        titles.addWidget(self.title_lbl)
+        titles.addWidget(self.sub_lbl)
+        head.addLayout(titles, 1)
+        lay.addLayout(head)
+
         self.payload_tab = PayloadTab(app)
         self.magisk_tab = MagiskTab(app)
         self.backup_tab = BackupTab(app)
@@ -83,22 +110,50 @@ class ToolboxPage(QWidget):
         self.tweaks_tab = TweaksTab(app)
         self.diag_tab = DiagnosticsTab(app)
         self.scripts_tab = ScriptsTab(app)
-        self.tabs.addTab(_scroll(self.tweaks_tab), "🎛 Твики")
-        self.tabs.addTab(self.scripts_tab, "📜 Сценарии")
-        self.tabs.addTab(self.payload_tab, "📦 Payload Dumper")
-        self.tabs.addTab(_scroll(self.magisk_tab), "🪄 Root (Magisk)")
-        self.tabs.addTab(_scroll(self.backup_tab), "💾 Бэкап")
-        self.tabs.addTab(self.debloat_tab, "🧹 Debloat")
-        self.tabs.addTab(_scroll(self.diag_tab), "🩺 Диагностика")
-        self.tabs.addTab(_scroll(self.hash_tab), "🔐 Хэши")
-        lay.addWidget(self.tabs, 1)
+
+        self.stack = QStackedWidget()
+        home = QWidget()
+        grid = QGridLayout(home)
+        grid.setContentsMargins(0, 0, 8, 0)
+        grid.setSpacing(14)
+        self.stack.addWidget(_scroll(home))
+        self._pages: dict[QWidget, tuple[int, str, str, str]] = {}
+        for i, (attr, icon, title, desc, scroll) in enumerate(TOOLS):
+            widget = getattr(self, attr)
+            tc = ToolCard(icon, title, desc)
+            tc.clicked.connect(lambda w=widget: self.show_tab(w))
+            grid.addWidget(tc, i // 2, i % 2)
+            frame = QFrame(objectName="card")
+            fl = QVBoxLayout(frame)
+            fl.setContentsMargins(0, 0, 0, 0)
+            fl.addWidget(_scroll(widget) if scroll else widget)
+            idx = self.stack.addWidget(frame)
+            self._pages[widget] = (idx, icon, title, desc)
+        grid.setRowStretch(grid.rowCount(), 1)
+        lay.addWidget(self.stack, 1)
+        QShortcut(QKeySequence("Alt+Left"), self, activated=self.go_home)
+
+    def tools(self) -> list[tuple[QWidget, str, str, str]]:
+        return [(w, icon, title, desc) for w, (_i, icon, title, desc) in self._pages.items()]
 
     def show_tab(self, widget: QWidget) -> None:
-        for i in range(self.tabs.count()):
-            w = self.tabs.widget(i)
-            if w is widget or (isinstance(w, QScrollArea) and w.widget() is widget):
-                self.tabs.setCurrentIndex(i)
+        idx, icon, title, desc = self._pages[widget]
+        self.stack.setCurrentIndex(idx)
+        self.back_btn.show()
+        self.crumb.setText("Инструменты  ›")
+        self.crumb.show()
+        self.title_lbl.setText(f"{icon} {title}")
+        self.sub_lbl.setText(desc)
+        fade_in(self.stack.currentWidget(), 160)
         self.app.show_page(self)
+
+    def go_home(self) -> None:
+        self.stack.setCurrentIndex(0)
+        self.back_btn.hide()
+        self.crumb.hide()
+        self.title_lbl.setText("🧰 Инструменты")
+        self.sub_lbl.setText("Выберите инструмент. Подсказка: Ctrl+K — быстрый поиск чего угодно.")
+        fade_in(self.stack.currentWidget(), 160)
 
     def shutdown(self) -> None:
         self.payload_tab.shutdown()

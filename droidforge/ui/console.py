@@ -6,21 +6,21 @@ import re
 from PyQt6.QtCore import Qt, pyqtSignal
 from PyQt6.QtGui import QColor, QFont, QKeyEvent, QTextCharFormat, QTextCursor
 from PyQt6.QtWidgets import (
-    QApplication, QCheckBox, QCompleter, QFrame, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit,
+    QApplication, QCheckBox, QCompleter, QSizePolicy, QWidget, QFrame, QHBoxLayout, QLabel, QLineEdit, QPlainTextEdit,
     QProgressBar, QVBoxLayout,
 )
 
-from . import theme
 from .widgets import button, label
 
+# The terminal is dark in both themes, so its colors are fixed.
 COLORS = {
-    "cmd": theme.ACCENT_2,
+    "cmd": "#22d3ee",
     "out": "#c9cfdd",
     "err": "#aeb6c8",
-    "ok": theme.SUCCESS,
-    "fail": theme.DANGER,
-    "info": "#9d8bff",
-    "warn": theme.WARN,
+    "ok": "#2ee6a6",
+    "fail": "#ff4d6d",
+    "info": "#a594ff",
+    "warn": "#ffb547",
 }
 RE_FAIL = re.compile(r"\b(FAILED|error|Error|ERROR|failed|Failure|denied|not found|cannot)\b")
 RE_OK = re.compile(r"\b(OKAY|Success|Finished|Total time|success)\b")
@@ -58,6 +58,7 @@ class Console(QFrame):
     commandEntered = pyqtSignal(str)
     lineWritten = pyqtSignal(str, str)
     stopRequested = pyqtSignal()
+    toggleRequested = pyqtSignal()
 
     def __init__(self, history: list[str], completions: list[str], parent=None):
         super().__init__(parent)
@@ -74,11 +75,22 @@ class Console(QFrame):
         self.progress.hide()
         self.stop_btn = button("⏹ Стоп", self.stopRequested.emit, "danger", "Остановить выполнение (Esc)")
         self.stop_btn.setEnabled(False)
+        self.toggle_btn = button("▾", self.toggleRequested.emit, "icon", "Свернуть / развернуть консоль (Ctrl+J)")
+        self.last_line = label("", "lastLine")
+        self.last_line.setMinimumWidth(80)
+        self.last_line.setSizePolicy(QSizePolicy.Policy.Ignored, QSizePolicy.Policy.Preferred)
+        self.last_line.hide()
         head = QHBoxLayout()
-        head.addWidget(label("🖥  Консоль", "cardTitle"))
+        head.addWidget(self.toggle_btn)
+        title = label("Консоль", "cardTitle")
+        title.setCursor(Qt.CursorShape.PointingHandCursor)
+        title.mousePressEvent = lambda _e: self.toggleRequested.emit()
+        head.addWidget(title)
         head.addSpacing(12)
         head.addWidget(self.status)
-        head.addStretch(1)
+        head.addSpacing(10)
+        head.addWidget(self.last_line, 1)
+        head.addStretch(0)
         head.addWidget(self.progress)
         head.addWidget(self.stop_btn)
         head.addWidget(button("📋", self.copy_all, "ghost", "Копировать всё"))
@@ -92,7 +104,9 @@ class Console(QFrame):
         self.view.setLineWrapMode(QPlainTextEdit.LineWrapMode.WidgetWidth)
         lay.addWidget(self.view, 1)
 
-        row = QHBoxLayout()
+        self.input_row = QWidget()
+        row = QHBoxLayout(self.input_row)
+        row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(8)
         prompt = QLabel("❯")
         prompt.setObjectName("prompt")
@@ -110,7 +124,8 @@ class Console(QFrame):
         row.addWidget(self.input, 1)
         row.addWidget(self.broadcast)
         row.addWidget(button("▶ Выполнить", self._submit, "accent"))
-        lay.addLayout(row)
+        lay.addWidget(self.input_row)
+        self.collapsed = False
 
         self._fmt_cache: dict[tuple[str, bool], QTextCharFormat] = {}
 
@@ -137,11 +152,11 @@ class Console(QFrame):
         self.lineWritten.emit(text, kind)
         if kind in ("out", "err"):
             if RE_FAIL.search(text):
-                color = theme.DANGER
+                color = COLORS["fail"]
             elif RE_OK.search(text):
-                color = theme.SUCCESS
+                color = COLORS["ok"]
             elif RE_WARN.search(text):
-                color = theme.WARN
+                color = COLORS["warn"]
             else:
                 color = COLORS[kind]
         else:
@@ -158,6 +173,19 @@ class Console(QFrame):
         cursor.insertText(text, self._fmt(color, bold))
         if at_bottom:
             sb.setValue(sb.maximum())
+        if self.collapsed:
+            self.last_line.setText(text)
+            self.last_line.setStyleSheet(f"color: {color};" if kind in ("ok", "fail", "warn") else "")
+
+    def set_collapsed(self, collapsed: bool) -> None:
+        self.collapsed = collapsed
+        self.view.setVisible(not collapsed)
+        self.input_row.setVisible(not collapsed)
+        self.last_line.setVisible(collapsed)
+        self.toggle_btn.setText("▴" if collapsed else "▾")
+        if collapsed:
+            last = self.view.document().lastBlock().text()
+            self.last_line.setText(last)
 
     def set_busy(self, busy: bool) -> None:
         self.stop_btn.setEnabled(busy)

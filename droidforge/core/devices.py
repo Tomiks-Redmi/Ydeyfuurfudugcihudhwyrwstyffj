@@ -115,12 +115,12 @@ class DeviceMonitor(QObject):
         capture(self.tools.adb, ["devices", "-l"], self._on_adb, timeout=10000)
 
     def _on_adb(self, code: int, out: str) -> None:
-        self._adb = _parse(out, fastboot=False) if code == 0 else []
+        self._adb = _parse(out, fastboot=False) if code >= 0 else []
         capture(self.tools.fastboot, ["devices"], self._on_fastboot, timeout=6000)
 
     def _on_fastboot(self, code: int, out: str) -> None:
         self._busy = False
-        fb = _parse(out, fastboot=True) if code == 0 else []
+        fb = _parse(out, fastboot=True) if code >= 0 else []
         known = {d.serial for d in self._adb}
         devices = self._adb + [d for d in fb if d.serial not in known]
         if devices != self._last:

@@ -289,3 +289,48 @@ class Toast(QLabel):
         self._anim.setEndValue(0.0)
         self._anim.finished.connect(self.hide)
         self._anim.start()
+
+
+class ToolCard(QFrame):
+    """Large clickable card: icon badge, title and description."""
+
+    clicked = pyqtSignal()
+
+    def __init__(self, icon: str, title: str, desc: str, parent=None):
+        super().__init__(parent)
+        self.setObjectName("toolcard")
+        self.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Fixed)
+        self.setMinimumHeight(118)
+        lay = QHBoxLayout(self)
+        lay.setContentsMargins(16, 16, 16, 16)
+        lay.setSpacing(14)
+        ic = label(icon, "toolIcon")
+        ic.setFixedSize(56, 56)
+        ic.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lay.addWidget(ic, 0, Qt.AlignmentFlag.AlignTop)
+        col = QVBoxLayout()
+        col.setSpacing(4)
+        col.addWidget(label(title, "toolTitle"))
+        d = label(desc, "toolDesc", wrap=True)
+        col.addWidget(d)
+        col.addStretch(1)
+        lay.addLayout(col, 1)
+
+    def mouseReleaseEvent(self, e: QMouseEvent) -> None:
+        if e.button() == Qt.MouseButton.LeftButton and self.rect().contains(e.position().toPoint()):
+            self.clicked.emit()
+
+
+def fade_in(widget: QWidget, ms: int = 200) -> None:
+    """Short opacity animation; the effect is removed afterwards to keep rendering cheap."""
+    effect = QGraphicsOpacityEffect(widget)
+    widget.setGraphicsEffect(effect)
+    anim = QPropertyAnimation(effect, b"opacity", widget)
+    anim.setDuration(ms)
+    anim.setStartValue(0.0)
+    anim.setEndValue(1.0)
+    anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+    anim.finished.connect(lambda: widget.setGraphicsEffect(None))
+    anim.start(QPropertyAnimation.DeletionPolicy.DeleteWhenStopped)

@@ -83,7 +83,16 @@ class SettingsPage(QWidget):
             self.accent.addItem(self._swatch(c1_), name)
         self.accent.setCurrentText(app.config.get("accent", "Фиолетовый"))
         self.accent.currentTextChanged.connect(self._accent_changed)
-        l3.addLayout(hbox(label("Цвет оформления:", "muted"), self.accent, None))
+        self.mode = QComboBox()
+        for text, key in (("🌙 Тёмная", "dark"), ("☀ Светлая", "light"), ("💻 Как в системе", "system")):
+            self.mode.addItem(text, key)
+        self.sync_theme()
+        self.mode.currentIndexChanged.connect(self._mode_changed)
+        l3.addLayout(hbox(label("Тема:", "muted"), self.mode, label("Цвет оформления:", "muted"), self.accent, None))
+        self.auto_expand = QCheckBox("Разворачивать свёрнутую консоль при ошибке")
+        self.auto_expand.setChecked(bool(app.config.get("console_auto_expand", True)))
+        self.auto_expand.toggled.connect(lambda v: app.config.set("console_auto_expand", v))
+        l3.addWidget(self.auto_expand)
         l3.addWidget(label(f"Файл настроек: <code>{CONFIG_FILE}</code>", "muted"))
         l3.addWidget(label("Весь вывод консоли сохраняется в журнал сессии — пригодится, если прошивка пошла не так.",
                            "muted", wrap=True))
@@ -95,7 +104,7 @@ class SettingsPage(QWidget):
         # ---- shortcuts
         c4, l4 = card("⌨ Горячие клавиши")
         l4.addWidget(label(
-            "<b>Ctrl+1…7</b> — разделы &nbsp;·&nbsp; <b>F5</b> — обновить устройства &nbsp;·&nbsp; "
+            "<b>Ctrl+K</b> — поиск команд и действий &nbsp;·&nbsp; <b>Ctrl+1…7</b> — разделы &nbsp;·&nbsp; <b>Ctrl+J</b> — свернуть консоль &nbsp;·&nbsp; <b>Ctrl+B</b> — свернуть меню &nbsp;·&nbsp; <b>Ctrl+T</b> — светлая/тёмная тема &nbsp;·&nbsp; <b>F5</b> — обновить устройства &nbsp;·&nbsp; "
             "<b>Ctrl+L</b> — консоль &nbsp;·&nbsp; <b>Esc</b> — остановить выполнение &nbsp;·&nbsp; "
             "<b>↑ / ↓</b> — история команд", "muted", wrap=True))
         lay.addWidget(c4)
@@ -109,8 +118,17 @@ class SettingsPage(QWidget):
         return QIcon(pm)
 
     def _accent_changed(self, name: str) -> None:
-        self.app.config.set("accent", name)
         self.app.apply_accent(name)
+
+    def sync_theme(self) -> None:
+        idx = self.mode.findData(self.app.config.get("theme_mode", "dark"))
+        self.mode.blockSignals(True)
+        self.mode.setCurrentIndex(max(0, idx))
+        self.mode.blockSignals(False)
+
+    def _mode_changed(self, _i: int) -> None:
+        self.app.config.set("theme_mode", self.mode.currentData())
+        self.app.apply_theme()
 
     def _show_detected(self) -> None:
         t = self.app.tools
