@@ -118,6 +118,7 @@ class QuickPage(QWidget):
         items.append({"title": title, "command": cmd})
         self.app.config.set("custom_commands", items)
         self.rebuild()
+        self.app.page_dashboard.refresh_favorites()
 
     def add_custom(self) -> None:
         dlg = CommandDialog(self)
@@ -133,3 +134,4 @@ class QuickPage(QWidget):
         items = [c for c in self.app.config.get("custom_commands", []) if (c["title"], c["command"]) != (title, cmd)]
         self.app.config.set("custom_commands", items)
         self.rebuild()
+        self.app.page_dashboard.refresh_favorites()

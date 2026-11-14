@@ -5,14 +5,16 @@ import re
 import time
 from pathlib import Path
 
-from PyQt6.QtCore import Qt, QTimer
+from PyQt6.QtCore import Qt, QTimer, QUrl
+from PyQt6.QtGui import QDesktopServices
 from PyQt6.QtWidgets import (
     QAbstractItemView, QFileDialog, QFrame, QGridLayout, QHBoxLayout, QHeaderView, QLabel, QLineEdit, QProgressBar,
     QScrollArea,
     QTableWidget, QTableWidgetItem, QVBoxLayout, QWidget,
 )
 
-from ..widgets import button, card, hbox, label
+from .. import theme
+from ..widgets import Tile, button, card, hbox, label
 
 ADB_FIELDS = [
     ("Производитель", "ro.product.manufacturer"),
@@ -104,6 +106,35 @@ class DashboardPage(QWidget):
         self.banner.hide()
         lay.addWidget(self.banner)
 
+        # ---- "how to connect" guide (shown when no device)
+        self.guide, gl = card("🔌 Как подключить телефон", "Четыре шага — и устройство появится в списке автоматически.")
+        steps = QGridLayout()
+        steps.setSpacing(12)
+        for i, (num, title, text) in enumerate([
+            ("1", "Режим разработчика", "Настройки → О телефоне → 7 раз нажмите «Номер сборки» (Xiaomi: «Версия ОС»)."),
+            ("2", "Отладка по USB", "Настройки → Для разработчиков → включите «Отладка по USB»."),
+            ("3", "Кабель с данными", "Подключите оригинальный кабель напрямую к ПК, режим USB — «Передача файлов»."),
+            ("4", "Разрешите доступ", "На экране телефона появится запрос — отметьте «Всегда» и нажмите «Разрешить»."),
+        ]):
+            step = QFrame(objectName="tile")
+            sl = QVBoxLayout(step)
+            sl.setContentsMargins(14, 12, 14, 12)
+            sl.setSpacing(4)
+            sl.addWidget(label(f"<span style='color:{theme.ACCENT}; font-size:16pt; font-weight:800'>{num}</span>"
+                               f"&nbsp;&nbsp;<b>{title}</b>"))
+            sl.addWidget(label(text, "muted", wrap=True))
+            sl.addStretch(1)
+            steps.addWidget(step, 0, i)
+        gl.addLayout(steps)
+        gl.addLayout(hbox(label("Не появляется?", "muted"),
+                          button("🔄 Перезапустить ADB", lambda: app.run_text("adb kill-server && adb start-server")),
+                          button("📶 Подключить по Wi‑Fi", lambda: (app.show_page(app.page_adb),
+                                                                  app.page_adb.tabs.setCurrentWidget(app.page_adb.wifi_tab))),
+                          button("🪟 Драйвер для Windows", lambda: QDesktopServices.openUrl(
+                              QUrl("https://developer.android.com/studio/run/win-usb"))),
+                          None))
+        lay.addWidget(self.guide)
+
         # ---- live monitor
         mon, ml = card()
         head = QHBoxLayout()
@@ -172,6 +203,19 @@ class DashboardPage(QWidget):
         mid.addWidget(act_card, 2)
         lay.addLayout(mid)
 
+        # ---- favorites
+        fav, fl = card()
+        fh = QHBoxLayout()
+        fh.addWidget(label("⭐ Избранные команды", "cardTitle"))
+        fh.addStretch(1)
+        fh.addWidget(button("➕ Добавить", lambda: app.page_quick.add_custom(), "ghost"))
+        fh.addWidget(button("Все команды →", lambda: app.show_page(app.page_quick), "ghost"))
+        fl.addLayout(fh)
+        self.fav_grid = QGridLayout()
+        self.fav_grid.setSpacing(10)
+        fl.addLayout(self.fav_grid)
+        lay.addWidget(fav)
+
         # ---- all properties
         props_card, pl = card("🧬 Все свойства")
         self.filter = QLineEdit()
@@ -190,6 +234,7 @@ class DashboardPage(QWidget):
         lay.addWidget(props_card)
 
         app.deviceChanged.connect(self.on_device)
+        self.refresh_favorites()
         self._fill_grid([])
 
     # --------------------------------------------------------------
@@ -198,6 +243,7 @@ class DashboardPage(QWidget):
         self.table.setRowCount(0)
         self.battery.setText("")
         self.hint.hide()
+        self.guide.setVisible(dev is None)
         if dev is None:
             self.icon.setText("📱")
             self.title.setText("Устройство не подключено")
@@ -294,6 +340,23 @@ class DashboardPage(QWidget):
         lines += [f"{k} = {v}" for k, v in sorted(self.props.items())]
         Path(path).write_text("\n".join(lines), encoding="utf-8")
         self.app.notify("📄 Отчёт сохранён", "ok")
+
+    def refresh_favorites(self) -> None:
+        while self.fav_grid.count():
+            w = self.fav_grid.takeAt(0).widget()
+            if w:
+                w.deleteLater()
+        favs = self.app.config.get("custom_commands", [])
+        if not favs:
+            self.fav_grid.addWidget(label("Добавьте свои команды (или ⭐ на любой быстрой команде через правый клик) — "
+                                          "они появятся здесь для запуска в один клик.", "muted", wrap=True), 0, 0)
+            return
+        for i, c in enumerate(favs[:8]):
+            t = Tile(c["title"], c["command"], c["command"])
+            t.clicked.connect(lambda cmd=c["command"]: self.app.run_text(cmd))
+            self.fav_grid.addWidget(t, i // 4, i % 4)
+        for col in range(4):
+            self.fav_grid.setColumnStretch(col, 1)
 
     def set_tools_ok(self, ok: bool) -> None:
         self.banner.setVisible(not ok)

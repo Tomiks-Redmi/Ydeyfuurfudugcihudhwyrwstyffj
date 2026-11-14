@@ -296,6 +296,13 @@ class DiagnosticsTab(QWidget):
                               "for z in /sys/class/thermal/thermal_zone*; do echo \"$(cat $z/type 2>/dev/null): "
                               "$(( $(cat $z/temp 2>/dev/null || echo 0) / 1000 ))°C\"; done", "Температурные датчики")),
                           button("📦 Топ процессов", lambda: self._run_view("top -b -n 1 -m 25", "Процессы")), None))
+        l1.addLayout(hbox(button("🔋 Здоровье батареи", self.battery_health),
+                          button("💽 Что занимает место", lambda: self._run_view(
+                              "echo '== /sdcard =='; du -sh /sdcard/* 2>/dev/null | sort -rh | head -25; "
+                              "echo; echo '== Разделы =='; df -h /data /system 2>/dev/null", "Занятое место")),
+                          button("🌐 Проверка сети", lambda: self._run_view(
+                              "ping -c 4 -W 2 8.8.8.8 2>&1; echo; ping -c 2 -W 2 google.com 2>&1 | tail -3", "Проверка интернета")),
+                          None))
         top.addWidget(c1, 0, 0)
 
         c2, l2 = card("🔗 Открыть на телефоне")
@@ -345,6 +352,36 @@ class DiagnosticsTab(QWidget):
         split.setMinimumHeight(340)
         l3.addWidget(split, 1)
         lay.addWidget(c3, 1)
+
+    def battery_health(self) -> None:
+        cmd = ("dumpsys battery; echo @@; B=/sys/class/power_supply/battery; "
+               "for f in cycle_count charge_full charge_full_design health voltage_now current_now temp; do "
+               "[ -r $B/$f ] && echo \"$f=$(cat $B/$f)\"; done")
+        if self.app.require_device(shell=True):
+            self.view_title.setText("⏳ Батарея…")
+            self.app.capture_adb(["shell", cmd], self._on_battery)
+
+    def _on_battery(self, code: int, out: str) -> None:
+        dump, _, sysfs = out.partition("@@")
+        vals = dict(l.strip().split("=", 1) for l in sysfs.splitlines() if "=" in l)
+        lines = ["🔋 СОСТОЯНИЕ БАТАРЕИ", ""]
+        try:
+            full, design = int(vals.get("charge_full", 0)), int(vals.get("charge_full_design", 0))
+            if full and design:
+                pct = full / design * 100
+                verdict = "отличное" if pct >= 90 else "хорошее" if pct >= 80 else "среднее" if pct >= 70 else "пора менять"
+                lines.append(f"Здоровье (ёмкость):  {pct:.0f}%  — {verdict}")
+                lines.append(f"Текущая ёмкость:     {full // 1000} мА·ч из {design // 1000} мА·ч")
+        except ValueError:
+            pass
+        if vals.get("cycle_count"):
+            lines.append(f"Циклов зарядки:      {vals['cycle_count']}")
+        if vals.get("health"):
+            lines.append(f"Статус (ядро):       {vals['health']}")
+        if not vals:
+            lines.append("Подробные данные (sysfs) недоступны без root на этом устройстве.")
+        lines += ["", "─" * 50, dump.strip()]
+        self._show("Здоровье батареи", "\n".join(lines))
 
     def _start(self, intent: str) -> None:
         if self.app.require_device(shell=True):

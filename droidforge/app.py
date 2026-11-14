@@ -8,7 +8,7 @@ from PyQt6.QtCore import QSize, Qt, pyqtSignal
 from PyQt6.QtGui import QAction, QFont, QIcon, QKeySequence, QPainter, QPixmap, QShortcut, QColor, QLinearGradient
 from PyQt6.QtWidgets import (
     QApplication, QComboBox, QFrame, QHBoxLayout, QLabel, QListWidget, QListWidgetItem,
-    QMainWindow, QMenu, QMessageBox, QPushButton, QSplitter, QStackedWidget, QSystemTrayIcon, QToolButton, QVBoxLayout, QWidget,
+    QMainWindow, QMenu, QMessageBox, QProgressBar, QPushButton, QSplitter, QStackedWidget, QSystemTrayIcon, QToolButton, QVBoxLayout, QWidget,
 )
 
 from . import __app_name__, __version__
@@ -20,6 +20,7 @@ from .core.runner import ECHO, SLEEP, CommandRunner, Job, capture
 from .core.tools import Tools
 from .ui import theme
 from .ui.console import Console
+from .ui.history import HistoryEntry, HistoryPopup
 from .ui.palette import CommandPalette, PaletteItem
 from .ui.widgets import Toast, button, fade_in, label
 
@@ -51,6 +52,8 @@ class MainWindow(QMainWindow):
         self._battery = ""
         self.apply_theme()
         self._queue_t0 = 0.0
+        self._queue_t0_wall = time.time()
+        self.history: list[HistoryEntry] = []
 
         self.setWindowTitle(f"{__app_name__} — ADB & Fastboot Studio")
         self.setWindowIcon(make_icon())
@@ -81,6 +84,11 @@ class MainWindow(QMainWindow):
         cl.setContentsMargins(0, 0, 0, 0)
         cl.setSpacing(0)
         cl.addWidget(self._build_header())
+        self.top_progress = QProgressBar(objectName="topProgress")
+        self.top_progress.setTextVisible(False)
+        self.top_progress.setFixedHeight(3)
+        self.top_progress.hide()
+        cl.addWidget(self.top_progress)
 
         self.stack = QStackedWidget()
         self.console = Console(self.config.get("history"), all_completions())
@@ -100,18 +108,21 @@ class MainWindow(QMainWindow):
         from .ui.pages.flash import FlashPage
         from .ui.pages.logcat import LogcatPage
         from .ui.pages.quick import QuickPage
+        from .ui.pages.rescue import RescuePage
         from .ui.pages.settings import SettingsPage
         from .ui.pages.toolbox import ToolboxPage
 
         self.page_dashboard = DashboardPage(self)
         self.page_flash = FlashPage(self)
+        self.page_rescue = RescuePage(self)
         self.page_adb = AdbToolsPage(self)
         self.page_toolbox = ToolboxPage(self)
         self.page_quick = QuickPage(self)
         self.page_logcat = LogcatPage(self)
         self.page_settings = SettingsPage(self)
         sections = [
-            ("ГЛАВНОЕ", [("🏠", "Обзор", self.page_dashboard), ("⚡", "Прошивка", self.page_flash)]),
+            ("ГЛАВНОЕ", [("🏠", "Обзор", self.page_dashboard), ("⚡", "Прошивка", self.page_flash),
+                         ("🚑", "Восстановление", self.page_rescue)]),
             ("УСТРОЙСТВО", [("📱", "ADB инструменты", self.page_adb), ("🧰", "Инструменты", self.page_toolbox),
                             ("📜", "Logcat", self.page_logcat)]),
             ("ЕЩЁ", [("🚀", "Быстрые команды", self.page_quick), ("⚙️", "Настройки", self.page_settings)]),
@@ -134,6 +145,7 @@ class MainWindow(QMainWindow):
 
         self.toast = Toast(self)
         self.palette = CommandPalette(self, self._palette_items)
+        self.history_popup = HistoryPopup(self)
         self.setAcceptDrops(True)
         self.tray = None
         if QSystemTrayIcon.isSystemTrayAvailable():
@@ -201,6 +213,9 @@ class MainWindow(QMainWindow):
         search.clicked.connect(self.palette_open)
         hl.addWidget(search)
         hl.addStretch(1)
+        self.history_btn = button("🕘", lambda: self.history_popup.open_at(self.history_btn), "icon",
+                                  "История операций (Ctrl+H)")
+        hl.addWidget(self.history_btn)
         self.theme_btn = button("🌙", self.toggle_theme, "icon", "Светлая / тёмная тема (Ctrl+T)")
         hl.addWidget(self.theme_btn)
 
@@ -278,8 +293,10 @@ class MainWindow(QMainWindow):
         self.runner.output.connect(self.console.write)
         self.console.lineWritten.connect(self.session_log.write)
         self.runner.busyChanged.connect(self.console.set_busy)
-        self.runner.busyChanged.connect(lambda b: b and setattr(self, "_queue_t0", time.monotonic()))
+        self.runner.busyChanged.connect(lambda b: b and self._mark_queue_start())
         self.runner.progress.connect(self.console.set_progress)
+        self.runner.progress.connect(self._top_progress)
+        self.runner.busyChanged.connect(lambda b: self.top_progress.setVisible(b))
         self.runner.queueFinished.connect(self._on_queue_finished)
         self.console.commandEntered.connect(self.run_text)
         self.console.stopRequested.connect(self.runner.stop)
@@ -297,6 +314,7 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("Ctrl+P"), self, activated=self.palette_open)
         QShortcut(QKeySequence("Ctrl+B"), self, activated=lambda: self.set_sidebar_collapsed(not self._sidebar_collapsed))
         QShortcut(QKeySequence("Ctrl+T"), self, activated=self.toggle_theme)
+        QShortcut(QKeySequence("Ctrl+H"), self, activated=lambda: self.history_popup.open_at(self.history_btn))
         QShortcut(QKeySequence("Esc"), self, activated=self.runner.stop)
 
     def _report_tools(self) -> None:
@@ -513,7 +531,8 @@ class MainWindow(QMainWindow):
             items.append(PaletteItem(icon, name, "Раздел", lambda p=page: self.show_page(p)))
         for widget, icon, title, desc in self.page_toolbox.tools():
             items.append(PaletteItem(icon, title, "Инструмент", lambda w=widget: self.page_toolbox.show_tab(w), desc))
-        for page, group in ((self.page_flash, "Прошивка"), (self.page_adb, "ADB инструменты")):
+        for page, group in ((self.page_flash, "Прошивка"), (self.page_adb, "ADB инструменты"),
+                            (self.page_rescue, "Восстановление")):
             for i in range(page.tabs.count()):
                 items.append(PaletteItem("›", page.tabs.tabText(i), group,
                                          lambda p=page, i=i: (self.show_page(p), p.tabs.setCurrentIndex(i))))
@@ -533,6 +552,11 @@ class MainWindow(QMainWindow):
             PaletteItem("🖥", "Свернуть / развернуть консоль", "Оформление",
                         lambda: self.set_console_collapsed(not self.console.collapsed)),
             PaletteItem("🧹", "Очистить консоль", "Консоль", self.console.clear),
+            PaletteItem("🕘", "История операций", "Действие", lambda: self.history_popup.open_at(self.history_btn)),
+            PaletteItem("🔁", "Переключить слот A/B (бутлуп)", "Восстановление", self.page_rescue.switch_slot,
+                        "bootloop бутлуп не загружается"),
+            PaletteItem("🧩", "Удалить модули Magisk (бутлуп)", "Восстановление", self.page_rescue.remove_magisk_modules,
+                        "bootloop бутлуп"),
             PaletteItem("⬇", "Скачать platform-tools", "Настройки",
                         lambda: (self.show_page(self.page_settings), self.page_settings.download())),
         ]
@@ -661,7 +685,23 @@ class MainWindow(QMainWindow):
                 return
             self.run([self.adb_job(*mapping[target])])
 
+    def _mark_queue_start(self) -> None:
+        self._queue_t0 = time.monotonic()
+        self._queue_t0_wall = time.time()
+        self.history_btn.setText("🕘")
+
+    def _top_progress(self, done: int, total: int) -> None:
+        if total <= 1:
+            self.top_progress.setRange(0, 0)
+        else:
+            self.top_progress.setRange(0, total)
+            self.top_progress.setValue(done)
+
     def _on_queue_finished(self, ok: bool) -> None:
+        self.history.append(HistoryEntry(self._queue_t0_wall, time.monotonic() - self._queue_t0, ok,
+                                         list(self.runner.queue_jobs)))
+        del self.history[:-40]
+        self.history_btn.setText("🕘" if ok else "🕘❗")
         callbacks, self._after = self._after, []
         for cb in callbacks:
             cb()

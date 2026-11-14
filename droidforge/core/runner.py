@@ -59,6 +59,7 @@ class CommandRunner(QObject):
         self._stopped = False
         self._buf = {"out": "", "err": ""}
         self._t0 = 0.0
+        self.queue_jobs: list[Job] = []   # every job of the current / last queue (for history)
 
     # ------------------------------------------------------------------ API
     @property
@@ -74,6 +75,8 @@ class CommandRunner(QObject):
             self._total = self._done = 0
             self._ok = True
             self._stop_on_error = stop_on_error
+            self.queue_jobs = []
+        self.queue_jobs.extend(jobs)
         self._queue.extend(jobs)
         self._total += len(jobs)
         self.progress.emit(self._done, self._total)
@@ -219,8 +222,12 @@ def capture(program: str, args: list[str], callback: Callable[[int, object], Non
         if state["done"]:
             return
         state["done"] = True
-        timer.stop()
-        data = bytes(proc.readAllStandardOutput())
+        try:
+            timer.stop()
+            data = bytes(proc.readAllStandardOutput())
+        except RuntimeError:  # Qt object already destroyed (application is closing)
+            _live.discard(proc)
+            return
         out: object = data if raw else data.decode("utf-8", errors="replace")
         _live.discard(proc)
         proc.deleteLater()

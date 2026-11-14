@@ -104,7 +104,7 @@ class SettingsPage(QWidget):
         # ---- shortcuts
         c4, l4 = card("⌨ Горячие клавиши")
         l4.addWidget(label(
-            "<b>Ctrl+K</b> — поиск команд и действий &nbsp;·&nbsp; <b>Ctrl+1…7</b> — разделы &nbsp;·&nbsp; <b>Ctrl+J</b> — свернуть консоль &nbsp;·&nbsp; <b>Ctrl+B</b> — свернуть меню &nbsp;·&nbsp; <b>Ctrl+T</b> — светлая/тёмная тема &nbsp;·&nbsp; <b>F5</b> — обновить устройства &nbsp;·&nbsp; "
+            "<b>Ctrl+K</b> — поиск команд и действий &nbsp;·&nbsp; <b>Ctrl+1…8</b> — разделы &nbsp;·&nbsp; <b>Ctrl+J</b> — свернуть консоль &nbsp;·&nbsp; <b>Ctrl+B</b> — свернуть меню &nbsp;·&nbsp; <b>Ctrl+T</b> — светлая/тёмная тема &nbsp;·&nbsp; <b>Ctrl+H</b> — история &nbsp;·&nbsp; <b>F5</b> — обновить устройства &nbsp;·&nbsp; "
             "<b>Ctrl+L</b> — консоль &nbsp;·&nbsp; <b>Esc</b> — остановить выполнение &nbsp;·&nbsp; "
             "<b>↑ / ↓</b> — история команд", "muted", wrap=True))
         lay.addWidget(c4)

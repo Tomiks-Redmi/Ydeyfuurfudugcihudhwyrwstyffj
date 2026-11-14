@@ -219,6 +219,8 @@ QProgressBar {{
     background: {INPUT}; border: 1px solid {BORDER}; border-radius: 6px;
     text-align: center; color: {TEXT}; font-size: 8pt; min-height: 14px; max-height: 14px;
 }}
+QProgressBar#topProgress {{ border: none; border-radius: 0; background: transparent; min-height: 3px; max-height: 3px; }}
+QProgressBar#topProgress::chunk {{ border-radius: 0; }}
 QProgressBar::chunk {{
     border-radius: 5px;
     background: qlineargradient(x1:0, y1:0, x2:1, y2:0, stop:0 {ACCENT}, stop:1 {ACCENT_2});
